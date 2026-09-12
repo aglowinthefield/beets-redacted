@@ -78,23 +78,36 @@ def string_similarity(a: str, b: str) -> float:
 
 
 def best_similarity(a_forms: list[str], b_forms: list[str]) -> float:
-    """Best similarity over every pairing of two sets of normalized renderings.
+    """Similarity between two names, each given as its normalized renderings.
 
     A Beets album tagged ``静けさの本`` and a Redacted group named
     ``静けさの本: Static for Piano`` share a rendering, so this returns 1.0 where a
     direct string comparison returns 0.
+
+    Sub-renderings only count when they match *exactly*. They exist to find the same
+    name written differently, not to fuzzy-match fragments: splitting
+    ``Diluvian 无 (Music For Self Extinction)`` yields ``music for self extinction``,
+    which is 0.74 similar to an unrelated ``Music for Self Esteem`` and was enough to
+    claim a false match. Every genuine cross-script case is an exact hit, so requiring
+    exactness costs nothing and removes that whole class of error. Anything less falls
+    back to comparing the names in full.
     """
     if not a_forms or not b_forms:
         return 0.0
-    best = 0.0
+
+    # name_variants puts the complete normalized string first.
+    full = (
+        1.0 if a_forms[0] == b_forms[0] else SequenceMatcher(None, a_forms[0], b_forms[0]).ratio()
+    )
+    if full == 1.0:
+        return 1.0
+
     for a in a_forms:
         for b in b_forms:
             if a == b:
                 return 1.0
-            score = SequenceMatcher(None, a, b).ratio()
-            if score > best:
-                best = score
-    return best
+
+    return full
 
 
 def year_similarity(year1: Union[int, None], year2: Union[int, None]) -> float:

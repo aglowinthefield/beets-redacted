@@ -142,3 +142,22 @@ def test_unrelated_names_still_score_low() -> None:
     """Variant expansion must not make everything match everything."""
     assert best_similarity(name_variants("Green"), name_variants("Wet Land")) < 0.5
     assert string_similarity("Hiroshi Yoshimura", "Susumu Yokota") < 0.6
+
+
+def test_partial_variant_does_not_create_a_false_match() -> None:
+    """Splitting a bracketed title must not fuzzy-match an unrelated release.
+
+    'Diluvian 无 (Music For Self Extinction)' is not on Redacted, but its bracketed
+    fragment is 0.74 similar to the same artist's 'Music for Self Esteem', which was
+    enough to claim a match and silently drop a real upload candidate.
+    """
+    score = best_similarity(
+        name_variants("Diluvian 无 (Music For Self Extinction)"),
+        name_variants("Music for Self Esteem"),
+    )
+    assert score < 0.7
+
+    # The real release still matches itself exactly.
+    assert best_similarity(
+        name_variants("Music For Self Esteem"), name_variants("Music for Self Esteem")
+    ) == pytest.approx(1.0)
