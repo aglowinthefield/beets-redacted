@@ -22,15 +22,13 @@ def normalize_query(
         r"\s+(and|ft\.?|feat\.?|featuring|\+|\&) .*", " ", artist, flags=re.IGNORECASE
     ).strip()
 
-    # Remove common release format terms that can interfere with search
-    album = re.sub(
-        r"\b(Web|CD|EP|Single|Vinyl|LP|Box Set|Disc|Collection|Volume|"
-        r"Years Of|Extended Version|Vol|Volume|Anniversary Edition|"
-        r"Remaster|Remastered|)\b",
-        "",
-        album,
-        flags=re.IGNORECASE,
-    )
+    # Deliberately no longer strips words like "EP", "Vol", "Single" or "Collection"
+    # from the title. They are ordinary title words as often as they are format noise,
+    # and removing them searches for the wrong record: "The Singles Collection" became
+    # "The Singles", "MIKUHOP EP" became "MIKUHOP", and "ANNIVERSARY VOL.10" became
+    # "ANNIVERSARY 10", which returns a different release that then scores well enough
+    # to be accepted. Edition noise in brackets is still removed below, and the scoring
+    # side tolerates the rest.
 
     query = f"{artist} {album}"
 

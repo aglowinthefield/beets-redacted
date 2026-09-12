@@ -648,6 +648,81 @@ def resolve_artist_by_name(
     return response, name, False
 
 
+def beets_fields_from_search_torrent(torrent: RedTorrent) -> Union[BeetsRedFields, None]:
+    """Build Beets fields straight from a browse-search hit.
+
+    The normal path reaches a release through its artist's discography, which a
+    compilation has no useful route to: Redacted credits it to "Various Artists", whose
+    artist page is not a discography in any meaningful sense. The browse response
+    carries everything needed except the artist-level fields, so map it directly.
+    """
+    if not (torrent.group_id and torrent.torrent_id):
+        return None
+
+    fields = BeetsRedFields()
+    fields.red_groupid = torrent.group_id
+    fields.red_torrentid = torrent.torrent_id
+    fields.red_artistid = torrent.artist_id
+    fields.red_artist = torrent.artist
+    fields.red_groupname = torrent.group
+    fields.red_groupyear = torrent.year
+    fields.red_media = torrent.media
+    fields.red_format = torrent.format
+    fields.red_encoding = torrent.encoding
+    fields.red_remastered = torrent.remastered
+    fields.red_remasteryear = torrent.remaster_year
+    fields.red_remastertitle = torrent.remaster_title
+    fields.red_scene = torrent.scene
+    fields.red_haslog = torrent.has_log
+    fields.red_logscore = torrent.log_score
+    fields.red_hascue = torrent.has_cue
+    fields.red_filecount = torrent.file_count
+    fields.red_size = torrent.size
+    fields.red_seeders = torrent.seeders
+    fields.red_leechers = torrent.leechers
+    fields.red_snatched = torrent.snatches
+    fields.red_time = torrent.torrent_time
+    return fields
+
+
+def match_from_search(
+    client: Client,
+    album: Album,
+    log: logging.Logger,
+    min_score: float,
+    alt_artists: Optional[list[str]] = None,
+) -> tuple[Optional[RedTorrent], float, bool]:
+    """Match an album against browse-search results directly, without an artist lookup.
+
+    Returns (best torrent, score, saw_error).
+    """
+    saw_error = False
+    best: Optional[RedTorrent] = None
+    best_score = 0.0
+
+    artists = [
+        a
+        for a in (album.albumartist, album.albumartist_credit, album.albumartist_sort)
+        if a and not is_generic_artist(a)
+    ] or [""]
+
+    for c_artist, c_album in itertools.product(artists, (album.album, album.albumdisambig)):
+        if not c_album:
+            continue
+        try:
+            match, score = best_match_from_search(client, album, c_artist, c_album, log)
+        except (RedactedError, RateLimitException) as e:
+            log.debug("Error searching for {0} - {1}: {2}", c_artist, c_album, e)
+            saw_error = True
+            continue
+        if match and score > best_score:
+            best, best_score = match, score
+        if best_score >= min_score:
+            break
+
+    return best, best_score, saw_error
+
+
 def search_album(
     album: Album,
     client: Client,
@@ -662,8 +737,12 @@ def search_album(
     within that artist's discography. The old free-text 'browse' search remains as a
     fallback for artists Redacted has under a name we don't hold.
     """
+    # MusicBrainz models "Various Artists" as a single entity whose alias list runs to
+    # hundreds of entries, including real band names ("30 Vermont Artists", "American
+    # Folk Blues Festival") and abbreviations like "AAVV". Every one of those resolves
+    # to some unrelated Redacted artist, so never take aliases for a generic credit.
     alt_artists: list[str] = []
-    if aliases is not None:
+    if aliases is not None and not is_generic_artist(album.get("albumartist", "") or ""):
         alt_artists = aliases.aliases_for_album(album)
 
     saw_error = False
@@ -688,6 +767,25 @@ def search_album(
     # candidate names reach rather than committing to the first.
     names = candidate_artist_names(album, alt_artists)
     log.debug("Artist name candidates for {0}: {1}", album.get("album"), names)
+
+    # A compilation has no artist to resolve, so go straight to the title search and
+    # match against the groups it returns.
+    if not names:
+        match, score, search_error = match_from_search(client, album, log, min_score, alt_artists)
+        saw_error = saw_error or search_error
+        if match and score >= min_score:
+            fields = beets_fields_from_search_torrent(match)
+            if fields is not None:
+                return SearchResult(
+                    outcome=SearchOutcome.MATCHED,
+                    fields=fields,
+                    score=score,
+                    artist_id=match.artist_id,
+                    artist_name=match.artist,
+                )
+        return SearchResult(
+            outcome=SearchOutcome.ERROR if saw_error else SearchOutcome.NO_ALBUM_MATCH, score=score
+        )
 
     def try_artist(artist_response: RedArtistResponse) -> tuple[Optional[SearchResult], float]:
         """Match within one artist's discography. Returns (match, best score seen)."""
