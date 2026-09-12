@@ -191,3 +191,39 @@ def test_shared_work_is_not_a_match(beets_title: str, red_title: str) -> None:
 def test_fragment_that_is_a_whole_title_still_matches(beets_title: str, red_title: str) -> None:
     score = best_similarity(name_variants(beets_title), name_variants(red_title))
     assert score == pytest.approx(1.0)
+
+
+def test_work_set_splits_a_multi_work_title() -> None:
+    from beetsplug.redacted.utils.text import work_set
+
+    assert work_set("Clapping Music / Music for Pieces of Wood / Sextet") == work_set(
+        "Sextet - Music for Pieces of Wood - Clapping Music"
+    )
+
+
+def test_work_set_ordering_does_not_matter_for_scoring() -> None:
+    """A classical release is identified by which works it holds, not their order."""
+    import logging
+
+    from beetsplug.redacted.matching import Matchable, score_match
+
+    weights = {"artist": 0.2, "title": 0.7, "year": 0.1}
+    log = logging.getLogger("test")
+
+    same = score_match(
+        Matchable(artist="Steve Reich", title="Clapping Music / Music for Pieces of Wood / Sextet"),
+        Matchable(artist="Steve Reich", title="Sextet - Music for Pieces of Wood - Clapping Music"),
+        log,
+        weights,
+    )
+    assert same.field_scores["title"] == pytest.approx(1.0)
+
+    # One shared work out of four is a different release, not the same one.
+    different = score_match(
+        Matchable(artist="Steve Reich", title="Four Organs / Phase Patterns"),
+        Matchable(artist="Steve Reich", title="New York Counterpoint / Eight Lines / Four Organs"),
+        log,
+        weights,
+    )
+    assert different.field_scores["title"] < 0.5
+    assert different.total_score < 0.75

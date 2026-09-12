@@ -8,7 +8,7 @@ from beets.library import Album  # type: ignore[import-untyped]
 from pydantic import Field
 from pydantic.dataclasses import dataclass
 
-from beetsplug.redacted.utils.text import artist_variants, name_variants, normalize
+from beetsplug.redacted.utils.text import artist_variants, name_variants, normalize, work_set
 
 
 @dataclass
@@ -38,12 +38,15 @@ class Matchable:
     # Normalized renderings, derived in __post_init__.
     artist_forms: list[str] = Field(default_factory=list)
     title_forms: list[str] = Field(default_factory=list)
+    title_works: frozenset[str] = Field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         if not self.artist_forms:
             self.artist_forms = artist_variants([self.artist, *self.alt_artists])
         if not self.title_forms:
             self.title_forms = name_variants(self.title)
+        if not self.title_works:
+            self.title_works = work_set(self.title)
 
 
 @dataclass
@@ -209,6 +212,15 @@ def score_match(
     # Compare every known rendering of each side, taking the best pairing.
     scores["artist"] = best_similarity(item1.artist_forms, item2.artist_forms)
     scores["title"] = best_similarity(item1.title_forms, item2.title_forms)
+
+    # When both titles list several works, how far the two sets agree is a better
+    # signal than string similarity, which is thrown off by ordering. Only ever
+    # raises the score, so a single work listed on a compilation cannot use this to
+    # claim the whole release.
+    works1, works2 = item1.title_works, item2.title_works
+    if len(works1) > 1 and len(works2) > 1:
+        overlap = len(works1 & works2) / len(works1 | works2)
+        scores["title"] = max(scores["title"], overlap)
 
     # Calculate optional field similarities if both items have the field
     if item1.year is not None and item2.year is not None:

@@ -33,6 +33,11 @@ _BRACKET_PAIRS = (
     ("《", "》"),
 )
 
+# Separators between distinct works on one release, as opposed to alternate renderings
+# of a single name. Classical and compilation titles list their contents this way.
+_WORK_SEPARATORS = re.compile(r"\s*(?:/|·|\u2014|\u2013|\s-\s)\s*")
+
+
 # Strings that separate distinct artists rather than alternate names for one artist.
 _ARTIST_SEPARATORS = re.compile(
     # The optional period must sit after the word boundary: "\bfeat\.?\b" would leave
@@ -202,3 +207,19 @@ def artist_variants(values: Iterable[str]) -> list[str]:
                 if variant not in out:
                     out.append(variant)
     return out
+
+
+def work_set(text: str) -> frozenset[str]:
+    """Split a title into the set of works it lists.
+
+    A classical or compilation release is identified by *which* works it contains, not
+    by the order they are printed in: ``Clapping Music / Music for Pieces of Wood /
+    Sextet`` and ``Sextet - Music for Pieces of Wood - Clapping Music`` are the same
+    record. Comparing these as sets recognizes that, and equally recognizes that
+    ``Four Organs / Phase Patterns`` shares only one work of four with ``New York
+    Counterpoint / Eight Lines / Four Organs`` and is a different record.
+    """
+    if not text:
+        return frozenset()
+    parts = (normalize(part) for part in _WORK_SEPARATORS.split(text))
+    return frozenset(part for part in parts if len(part) > 1)
