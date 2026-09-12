@@ -58,6 +58,44 @@ _EDITION_NOISE = re.compile(
 )
 
 
+# Unicode punctuation that MusicBrainz uses and Redacted's exact artist-name lookup
+# does not accept. NFKC leaves all of these alone -- U+2010 HYPHEN is not mapped to
+# ASCII hyphen-minus -- so "Beverly Glenn\u2010Copeland" returns "no artist found"
+# while the ASCII spelling resolves to artist 417797.
+_ASCII_PUNCTUATION = str.maketrans(
+    {
+        "\u2010": "-",  # hyphen
+        "\u2011": "-",  # non-breaking hyphen
+        "\u2012": "-",  # figure dash
+        "\u2013": "-",  # en dash
+        "\u2014": "-",  # em dash
+        "\u2015": "-",  # horizontal bar
+        "\u2212": "-",  # minus sign
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2032": "'",
+        "\u2033": '"',
+        "\u00a0": " ",  # non-breaking space
+        "\u2009": " ",  # thin space
+        "\u202f": " ",  # narrow no-break space
+    }
+)
+
+
+def ascii_punctuation(text: str) -> str:
+    """Replace Unicode dashes, quotes and spaces with their ASCII equivalents.
+
+    Only punctuation is touched; letters are left exactly as they are, so this is safe
+    for names in any script. Used to produce a second spelling to look an artist up
+    under, because Redacted matches artist names exactly.
+    """
+    return text.translate(_ASCII_PUNCTUATION) if text else text
+
+
 def unescape(text: str) -> str:
     """Fully decode HTML entities, including double-encoded ones.
 

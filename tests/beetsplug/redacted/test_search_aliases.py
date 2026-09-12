@@ -358,3 +358,22 @@ def test_search_reports_the_best_artist_when_several_are_tried(log: FakeLogger) 
 
     assert result.outcome is SearchOutcome.NO_ALBUM_MATCH
     assert result.artist_id == 111  # Harold Budd scored higher than the empty page
+
+
+def test_candidate_names_offer_an_ascii_spelling() -> None:
+    """Redacted matches artist names exactly and rejects MusicBrainz's punctuation.
+
+    "Beverly Glenn‐Copeland" (U+2010 HYPHEN, which NFKC does not fold) returns "no
+    artist found", while the ASCII spelling resolves. Both must be offered.
+    """
+    album = make_album(albumartist="Beverly Glenn‐Copeland", albumartist_sort="")
+    names = candidate_artist_names(album)
+
+    assert "Beverly Glenn‐Copeland" in names
+    assert "Beverly Glenn-Copeland" in names
+
+
+def test_candidate_names_still_dedupe_nfkc_equivalents() -> None:
+    """Halfwidth and fullwidth middle dots are the same string to the server."""
+    album = make_album(albumartist="A･I･R", albumartist_sort="A・I・R")
+    assert len(candidate_artist_names(album)) == 1

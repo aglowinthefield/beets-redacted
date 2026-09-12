@@ -6,6 +6,7 @@ import functools
 import itertools
 import logging
 import time
+import unicodedata
 from collections.abc import Generator, Iterable
 from typing import Callable, Optional, Union
 
@@ -28,7 +29,7 @@ from beetsplug.redacted.types import (
     TorrentType,
 )
 from beetsplug.redacted.utils.search_utils import normalize_query
-from beetsplug.redacted.utils.text import normalize, split_artists
+from beetsplug.redacted.utils.text import ascii_punctuation, normalize, split_artists
 
 
 @dataclasses.dataclass
@@ -579,11 +580,25 @@ def candidate_artist_names(
     for name in raw:
         expanded.extend(split_artists(name))
 
+    # Redacted matches artist names exactly and rejects the Unicode punctuation
+    # MusicBrainz uses, so offer an ASCII spelling of each name as well. These are
+    # appended rather than substituted: either spelling may be the one Redacted knows.
+    for name in list(expanded):
+        folded = ascii_punctuation(name)
+        if folded != name:
+            expanded.append(folded)
+
     out: list[str] = []
     seen: set[str] = set()
     for name in expanded:
-        key = normalize(name)
-        if not key or key in seen or key in GENERIC_ARTIST_NAMES:
+        if not normalize(name) or normalize(name) in GENERIC_ARTIST_NAMES:
+            continue
+        # De-duplicate only on what Redacted itself would treat as the same string.
+        # Matching normalization is far lossier -- it strips punctuation entirely -- and
+        # using it here discarded the ASCII spellings above as duplicates, which is the
+        # whole reason they are generated.
+        key = unicodedata.normalize("NFKC", name).casefold().strip()
+        if key in seen:
             continue
         seen.add(key)
         out.append(name)
