@@ -10,11 +10,12 @@ import frozendict
 from beets.dbcore import types as dbtypes  # type: ignore[import-untyped]
 from beets.importer import ImportTask  # type: ignore[import-untyped]
 from beets.library import Library  # type: ignore[import-untyped]
+from beets import ui  # type: ignore[import-untyped]
 from beets.plugins import BeetsPlugin  # type: ignore[import-untyped]
 
 from beetsplug.redacted.aliases import AliasProvider
 from beetsplug.redacted.client import Client
-from beetsplug.redacted.command import RedactedCommand
+from beetsplug.redacted.command import RedactedCommand, RedactedMissingCommand
 from beetsplug.redacted.http import CachedRequestsClient, HTTPClient
 from beetsplug.redacted.search import SearchOutcome, search_album
 
@@ -166,10 +167,13 @@ class RedactedPlugin(BeetsPlugin):
 
         return fields_changed or stamped
 
-    def commands(self) -> list[RedactedCommand]:
+    def commands(self) -> list[ui.Subcommand]:
         """Get the commands provided by this plugin.
 
         Returns:
             List of commands.
         """
-        return [RedactedCommand(self.config, self._log, self._client, self._aliases)]
+        return [
+            RedactedCommand(self.config, self._log, self._client, self._aliases),
+            RedactedMissingCommand(self._log),
+        ]

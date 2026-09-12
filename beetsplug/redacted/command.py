@@ -204,3 +204,110 @@ class RedactedCommand(ui.Subcommand):
                 )
 
             self.func = func
+
+
+# Statuses that are positive evidence a release is not on Redacted. ERROR is
+# deliberately excluded: a failed lookup says nothing about whether the tracker has it.
+ABSENT_STATUSES = (SearchOutcome.NO_ARTIST.value, SearchOutcome.NO_ALBUM_MATCH.value)
+
+DEFAULT_MISSING_FORMAT = "$albumartist - $album ($year) [$red_status]"
+
+
+def missing_command_func(
+    lib: Library, opts: Values, args: list[str], log: logging.Logger
+) -> dict[str, int]:
+    """List albums that Redacted was asked about and does not have.
+
+    This reads only the Beets database -- the API work was already done by
+    `beet redacted` -- so it is instant and safe to run repeatedly.
+    """
+    query = " ".join(args) if args else ""
+
+    if opts.ensure_value("unchecked", False):
+        statuses = [None]
+        selector = f"{query} red_checked::^$".strip()
+        albums = list(lib.albums(ui.decargs(selector)))
+    else:
+        wanted = opts.ensure_value("status", None)
+        statuses = [wanted] if wanted else list(ABSENT_STATUSES)
+        albums = []
+        seen: set[int] = set()
+        for status in statuses:
+            selector = f"{query} red_status:{status}".strip()
+            for album in lib.albums(ui.decargs(selector)):
+                if album.id not in seen:
+                    seen.add(album.id)
+                    albums.append(album)
+
+    fmt = opts.ensure_value("format", None) or DEFAULT_MISSING_FORMAT
+    for album in albums:
+        ui.print_(format(album, fmt))
+
+    total = len(albums)
+    ui.print_("")
+    ui.print_(f"{total} album(s).")
+
+    # Unchecked albums are the blind spot: they are not evidence of absence, and
+    # silently omitting them would overstate how complete the picture is.
+    if not opts.ensure_value("unchecked", False):
+        n_unchecked = len(lib.albums(ui.decargs(f"{query} red_checked::^$".strip())))
+        if n_unchecked:
+            ui.print_(
+                f"{n_unchecked} album(s) have never been looked up; "
+                "run 'beet redacted' first, or list them with 'beet redmissing --unchecked'."
+            )
+
+    return {"total": total}
+
+
+class RedactedMissingCommand(ui.Subcommand):
+    """List albums that are not on Redacted, i.e. candidates to upload."""
+
+    def __init__(self, log: logging.Logger) -> None:
+        """Initialize the command."""
+        self.log = log
+
+        parser = OptionParser(usage="beet redmissing [options] [QUERY...]")
+        parser.add_option(
+            "-s",
+            "--status",
+            dest="status",
+            default=None,
+            help=(
+                "Only list albums with this red_status: 'no_artist' (Redacted has no "
+                "such artist) or 'no_album_match' (the artist is there, this release "
+                "is not). Default: both."
+            ),
+        )
+        parser.add_option(
+            "-u",
+            "--unchecked",
+            action="store_true",
+            dest="unchecked",
+            default=False,
+            help="Instead list albums that have never been looked up on Redacted",
+        )
+        parser.add_option(
+            "-f",
+            "--format",
+            dest="format",
+            default=None,
+            help="Beets format string for each line",
+        )
+
+        super().__init__(
+            name="redmissing",
+            parser=parser,
+            help="List library albums that are not on Redacted",
+        )
+
+        def func(lib: Library, opts: Values, args: list[str]) -> dict[str, int]:
+            for key, value in {
+                "status": None,
+                "unchecked": False,
+                "format": None,
+            }.items():
+                opts.ensure_value(key, value)
+            return missing_command_func(lib, opts, args, self.log)
+
+        self.func = func
