@@ -52,9 +52,14 @@ def test_string_similarity(str1: str, str2: str, expected_range: tuple[float, fl
         # Within 1 year
         (2020, 2019, 0.5),
         (2020, 2021, 0.5),
-        # More than 1 year difference
-        (2020, 2018, 0.0),
-        (2020, 2022, 0.0),
+        # Within 3 years: reissues are often dated to the reissue on one side and the
+        # original recording on the other, so decay rather than hard-zero.
+        (2020, 2018, 0.25),
+        (2020, 2022, 0.25),
+        (2020, 2023, 0.25),
+        # More than 3 years difference
+        (2020, 2015, 0.0),
+        (2020, 2025, 0.0),
         # None values
         (None, 2020, 1.0),
         (2020, None, 1.0),

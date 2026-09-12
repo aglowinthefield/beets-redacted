@@ -2,15 +2,25 @@
 
 import logging
 from difflib import SequenceMatcher
-from typing import Union
+from typing import Optional, Union
 
 from beets.library import Album  # type: ignore[import-untyped]
+from pydantic import Field
 from pydantic.dataclasses import dataclass
+
+from beetsplug.redacted.utils.text import artist_variants, name_variants, normalize
 
 
 @dataclass
 class Matchable:
-    """Common fields that can be used for matching."""
+    """Common fields that can be used for matching.
+
+    ``artist`` and ``title`` are the raw display strings. Because Redacted and Beets
+    frequently spell the same release differently -- romanized vs native script, with or
+    without a bracketed alternate -- each is expanded into a list of normalized
+    renderings at construction time, and scoring compares every rendering on one side
+    against every rendering on the other.
+    """
 
     # Required fields with defaults to avoid initialization issues
     artist: str = ""
@@ -20,6 +30,20 @@ class Matchable:
     year: Union[int, None] = None
     media: Union[str, None] = None
     format: Union[str, None] = None
+
+    # Additional artist names known to refer to the same artist, e.g. MusicBrainz
+    # aliases. Folded into the artist variants used for scoring.
+    alt_artists: list[str] = Field(default_factory=list)
+
+    # Normalized renderings, derived in __post_init__.
+    artist_forms: list[str] = Field(default_factory=list)
+    title_forms: list[str] = Field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.artist_forms:
+            self.artist_forms = artist_variants([self.artist, *self.alt_artists])
+        if not self.title_forms:
+            self.title_forms = name_variants(self.title)
 
 
 @dataclass
@@ -31,7 +55,10 @@ class MatchResult:
 
 
 def string_similarity(a: str, b: str) -> float:
-    """Calculate string similarity using SequenceMatcher.
+    """Calculate similarity between two strings after normalization.
+
+    Normalization decodes HTML entities, applies NFKC, folds Latin diacritics and
+    strips punctuation, so ``Pier &amp; Loft`` and ``Pier & Loft`` compare equal.
 
     Args:
         a: First string
@@ -42,7 +69,32 @@ def string_similarity(a: str, b: str) -> float:
     """
     if not a or not b:
         return 0.0
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    na, nb = normalize(a), normalize(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb:
+        return 1.0
+    return SequenceMatcher(None, na, nb).ratio()
+
+
+def best_similarity(a_forms: list[str], b_forms: list[str]) -> float:
+    """Best similarity over every pairing of two sets of normalized renderings.
+
+    A Beets album tagged ``静けさの本`` and a Redacted group named
+    ``静けさの本: Static for Piano`` share a rendering, so this returns 1.0 where a
+    direct string comparison returns 0.
+    """
+    if not a_forms or not b_forms:
+        return 0.0
+    best = 0.0
+    for a in a_forms:
+        for b in b_forms:
+            if a == b:
+                return 1.0
+            score = SequenceMatcher(None, a, b).ratio()
+            if score > best:
+                best = score
+    return best
 
 
 def year_similarity(year1: Union[int, None], year2: Union[int, None]) -> float:
@@ -64,23 +116,43 @@ def year_similarity(year1: Union[int, None], year2: Union[int, None]) -> float:
     if abs(year1 - year2) <= 1:
         return 0.5  # If years are within 1 year, consider it a partial match
 
+    # Reissues of older material are routinely dated to the reissue year on one side
+    # and the original recording year on the other, so decay rather than hard-zero.
+    if abs(year1 - year2) <= 3:
+        return 0.25
+
     return 0.0  # Different years are considered completely different
 
 
-def extract_album_fields(album: Album) -> Matchable:
+def extract_album_fields(album: Album, alt_artists: Optional[list[str]] = None) -> Matchable:
     """Extract normalized fields from a Beets album.
 
     Args:
         album: Beets album to extract fields from
+        alt_artists: Additional names known to refer to the same artist (e.g. MusicBrainz
+            aliases), used to match releases credited in another script.
 
     Returns:
         MatchableFields object with normalized fields
     """
     assert isinstance(album, Album), f"album must be a Beets Album, got {type(album)}"
-    if "year" in album:
-        year = album.get("year", None)
-        if year == 0:
-            year = None
+
+    year = album.get("year", None)
+    if year == 0:
+        year = None
+
+    # Every spelling Beets knows for this album's artist feeds the variant set.
+    credits = [
+        album.get("albumartist", "") or "",
+        album.get("albumartist_credit", "") or "",
+        album.get("albumartist_sort", "") or "",
+    ]
+    albumartists = album.get("albumartists", None)
+    if isinstance(albumartists, (list, tuple)):
+        credits.extend(str(a) for a in albumartists)
+    elif albumartists:
+        credits.append(str(albumartists))
+    credits.extend(alt_artists or [])
 
     return Matchable(
         artist=album.get("albumartist"),
@@ -88,6 +160,7 @@ def extract_album_fields(album: Album) -> Matchable:
         year=year,
         media=album.get("media", None) if "media" in album else None,
         format=album.get("format", None) if "format" in album else None,
+        alt_artists=[c for c in credits if c],
     )
 
 
@@ -114,9 +187,9 @@ def score_match(
 
     scores: dict[str, float] = {}
 
-    # Calculate required field similarities
-    scores["artist"] = string_similarity(item1.artist, item2.artist)
-    scores["title"] = string_similarity(item1.title, item2.title)
+    # Compare every known rendering of each side, taking the best pairing.
+    scores["artist"] = best_similarity(item1.artist_forms, item2.artist_forms)
+    scores["title"] = best_similarity(item1.title_forms, item2.title_forms)
 
     # Calculate optional field similarities if both items have the field
     if item1.year is not None and item2.year is not None:
