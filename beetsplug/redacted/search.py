@@ -560,17 +560,21 @@ def candidate_artist_names(
     return out
 
 
-def resolve_artist_by_name(
+def iter_artists_by_name(
     client: Client, names: list[str], log: logging.Logger
-) -> tuple[Optional[RedArtistResponse], Optional[str], bool]:
-    """Find an artist on Redacted by trying each candidate name in turn.
+) -> Generator[tuple[RedArtistResponse, str], None, bool]:
+    """Yield every Redacted artist the candidate names resolve to, in order.
 
-    Redacted resolves its own artist aliases, so any registered spelling reaches the
-    same artist page. Returns the first hit, the name that found it, and whether any
-    attempt failed for a reason other than "no such artist" (which would make a
-    negative result untrustworthy).
+    Returns (as the generator's value) whether any attempt failed for a reason other
+    than "no such artist", which would make a negative result untrustworthy.
+
+    All of them, not just the first: Redacted has artist pages for collaborations, so
+    "Harold Budd & Clive Wright" resolves to a real page of exactly that name which
+    holds none of the duo's releases -- those sit under Harold Budd. Stopping at the
+    first page that happens to exist reports the album as absent when it is not.
     """
     saw_error = False
+    seen_ids: set[int] = set()
     for name in names:
         try:
             response = client.get_artist_by_name(name)
@@ -582,16 +586,34 @@ def resolve_artist_by_name(
             saw_error = True
             continue
 
-        if response and response.response and response.response.id:
-            log.debug(
-                "Resolved Redacted artist {0} (id {1}) from name {2}",
-                response.response.name,
-                response.response.id,
-                name,
-            )
-            return response, name, saw_error
+        if not (response and response.response and response.response.id):
+            continue
+        if response.response.id in seen_ids:
+            continue
+        seen_ids.add(response.response.id)
 
-    return None, None, saw_error
+        log.debug(
+            "Resolved Redacted artist {0} (id {1}) from name {2}",
+            response.response.name,
+            response.response.id,
+            name,
+        )
+        yield response, name
+
+    return saw_error
+
+
+def resolve_artist_by_name(
+    client: Client, names: list[str], log: logging.Logger
+) -> tuple[Optional[RedArtistResponse], Optional[str], bool]:
+    """Find the first Redacted artist matching any of the candidate names."""
+    generator = iter_artists_by_name(client, names, log)
+    try:
+        response, name = next(generator)
+    except StopIteration as stop:
+        return None, None, bool(stop.value)
+    generator.close()
+    return response, name, False
 
 
 def search_album(
@@ -630,14 +652,58 @@ def search_album(
         log.debug("Error retrieving snatched torrents: {0}", e)
         saw_error = True
 
-    # Primary strategy: resolve the artist directly by name.
+    # Primary strategy: resolve the artist directly by name, and try every artist the
+    # candidate names reach rather than committing to the first.
     names = candidate_artist_names(album, alt_artists)
     log.debug("Artist name candidates for {0}: {1}", album.get("album"), names)
-    artist_response, matched_name, name_error = resolve_artist_by_name(client, names, log)
-    saw_error = saw_error or name_error
 
-    # Fallback: free-text search, used only to discover an artist id.
-    if artist_response is None:
+    def try_artist(artist_response: RedArtistResponse) -> tuple[Optional[SearchResult], float]:
+        """Match within one artist's discography. Returns (match, best score seen)."""
+        artist_data = artist_response.response
+        group, torrent, score = match_artist_album_scored(
+            album, artist_response, preferred_torrents, log, min_score, alt_artists
+        )
+        if group and torrent:
+            fields = beets_fields_from_artist_torrent_groups(artist_data, group, torrent, log)
+            if fields is not None:
+                return (
+                    SearchResult(
+                        outcome=SearchOutcome.MATCHED,
+                        fields=fields,
+                        score=score,
+                        artist_id=artist_data.id,
+                        artist_name=artist_data.name,
+                    ),
+                    score,
+                )
+            log.debug(
+                "Could not build Beets fields for {0}, treating as no match", album.get("album")
+            )
+        return None, score
+
+    # Best near-miss across every artist tried, for reporting when nothing matches.
+    best_score = 0.0
+    best_artist: Optional[RedArtistResponseResults] = None
+    found_any_artist = False
+
+    artists = iter_artists_by_name(client, names, log)
+    while True:
+        try:
+            artist_response, _ = next(artists)
+        except StopIteration as stop:
+            saw_error = saw_error or bool(stop.value)
+            break
+
+        found_any_artist = True
+        match, score = try_artist(artist_response)
+        if match is not None:
+            return match
+        if best_artist is None or score > best_score:
+            best_score = score
+            best_artist = artist_response.response
+
+    # Fallback: free-text search, used only to discover an artist id we haven't tried.
+    if not found_any_artist:
         artist_id: Optional[int] = snatched_artist_id
 
         if artist_id is None:
@@ -648,13 +714,15 @@ def search_album(
                 if not c_artist or not c_album:
                     continue
                 try:
-                    match, score = best_match_from_search(client, album, c_artist, c_album, log)
+                    match_torrent, score = best_match_from_search(
+                        client, album, c_artist, c_album, log
+                    )
                 except (RedactedError, RateLimitException) as e:
                     log.debug("Error searching for {0} - {1}: {2}", c_artist, c_album, e)
                     saw_error = True
                     continue
-                if match and score >= min_score and match.artist_id:
-                    artist_id = match.artist_id
+                if match_torrent and score >= min_score and match_torrent.artist_id:
+                    artist_id = match_torrent.artist_id
                     break
 
         if artist_id is None:
@@ -673,34 +741,22 @@ def search_album(
             log.debug("Error looking up artist {0}: {1}", artist_id, e)
             return SearchResult(outcome=SearchOutcome.ERROR)
 
-    artist_data = artist_response.response
-    group, torrent, score = match_artist_album_scored(
-        album, artist_response, preferred_torrents, log, min_score, alt_artists
-    )
-
-    if group and torrent:
-        fields = beets_fields_from_artist_torrent_groups(artist_data, group, torrent, log)
-        if fields is not None:
-            return SearchResult(
-                outcome=SearchOutcome.MATCHED,
-                fields=fields,
-                score=score,
-                artist_id=artist_data.id,
-                artist_name=artist_data.name,
-            )
-        log.debug("Could not build Beets fields for {0}, treating as no match", album.get("album"))
+        match, best_score = try_artist(artist_response)
+        if match is not None:
+            return match
+        best_artist = artist_response.response
 
     log.debug(
         "Redacted artist {0} has no release matching {1} (best score {2:.2f})",
-        artist_data.name,
+        best_artist.name if best_artist else "?",
         album.get("album"),
-        score,
+        best_score,
     )
     return SearchResult(
         outcome=SearchOutcome.ERROR if saw_error else SearchOutcome.NO_ALBUM_MATCH,
-        score=score,
-        artist_id=artist_data.id,
-        artist_name=artist_data.name,
+        score=best_score,
+        artist_id=best_artist.id if best_artist else None,
+        artist_name=best_artist.name if best_artist else None,
     )
 
 

@@ -104,7 +104,13 @@ def best_similarity(a_forms: list[str], b_forms: list[str]) -> float:
 
     for a in a_forms:
         for b in b_forms:
-            if a == b:
+            # A sub-rendering must be the *whole* of one side's name. That is what
+            # distinguishes "the same release written differently" from "this work also
+            # appears on that compilation": "Quiet Forest" is the entire Beets title of
+            # "Quiet Forest (クワイエット・フォレスト)", but "Four Organs" is merely one
+            # work of three on both "Four Organs / Phase Patterns" and "New York
+            # Counterpoint / Eight Lines / Four Organs", which are different releases.
+            if a == b and (a == a_forms[0] or b == b_forms[0]):
                 return 1.0
 
     return full

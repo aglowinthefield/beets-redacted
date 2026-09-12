@@ -161,3 +161,33 @@ def test_partial_variant_does_not_create_a_false_match() -> None:
     assert best_similarity(
         name_variants("Music For Self Esteem"), name_variants("Music for Self Esteem")
     ) == pytest.approx(1.0)
+
+
+# Classical and compilation titles use "/" to separate the works on a release, not to
+# give an alternate rendering of one name. A shared work must not make two different
+# releases look like the same one.
+SHARED_WORK_NOT_SAME_RELEASE = [
+    ("Live / Electric Music", "The Desert Music (Live)"),
+    ("Four Organs / Phase Patterns", "New York Counterpoint / Eight Lines / Four Organs"),
+    ("Eight Lines / City Life", "Sextet / Piano Phase / Eight Lines"),
+]
+
+
+@pytest.mark.parametrize("beets_title, red_title", SHARED_WORK_NOT_SAME_RELEASE)
+def test_shared_work_is_not_a_match(beets_title: str, red_title: str) -> None:
+    score = best_similarity(name_variants(beets_title), name_variants(red_title))
+    assert score < 0.9, f"{beets_title!r} wrongly matched {red_title!r} at {score}"
+
+
+@pytest.mark.parametrize(
+    "beets_title, red_title",
+    [
+        # The fragment is the whole of the Beets title.
+        ("Quiet Forest", "Quiet Forest (クワイエット・フォレスト)"),
+        # The fragment is the whole of the Redacted title (an A-side/B-side single).
+        ("Campo / Outside With You", "Campo"),
+    ],
+)
+def test_fragment_that_is_a_whole_title_still_matches(beets_title: str, red_title: str) -> None:
+    score = best_similarity(name_variants(beets_title), name_variants(red_title))
+    assert score == pytest.approx(1.0)

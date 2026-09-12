@@ -292,3 +292,69 @@ def test_command_keeps_its_alias_provider() -> None:
     assert command._alias_provider is provider
     # The base class's own attribute must be left alone.
     assert command.aliases == ()
+
+
+def test_search_falls_through_a_dead_end_collaboration_artist(log: FakeLogger) -> None:
+    """Redacted has artist pages for collaborations that hold none of the releases.
+
+    'Harold Budd & Clive Wright' is a real Redacted artist page with no torrent groups;
+    the duo's albums sit under Harold Budd. Stopping at the first name that resolves
+    reported those albums as absent when they are not.
+    """
+    client = FakeClient()
+    client.user_response = empty_user_response()
+
+    # The combined page exists but is empty.
+    client.artist_name_responses["Harold Budd & Clive Wright"] = RedArtistResponse(
+        status="success",
+        response=RedArtistResponseResults(
+            id=999, name="Harold Budd & Clive Wright", torrentgroup=[]
+        ),
+    )
+    # The real release lives under the solo artist.
+    client.artist_name_responses["Harold Budd"] = RedArtistResponse(
+        status="success",
+        response=RedArtistResponseResults(
+            id=111, name="Harold Budd", torrentgroup=[make_group("Candylion", 2009, group_id=555)]
+        ),
+    )
+
+    album = make_album(
+        albumartist="Harold Budd & Clive Wright", albumartist_sort="", album="Candylion", year=2009
+    )
+    result = search_album(album, client, log, min_score=0.75)
+
+    assert result.outcome is SearchOutcome.MATCHED
+    assert result.fields is not None
+    assert result.fields.red_groupid == 555
+    # The empty collaboration page was tried first, then fallen through.
+    assert client.artist_name_queries[0] == "Harold Budd & Clive Wright"
+
+
+def test_search_reports_the_best_artist_when_several_are_tried(log: FakeLogger) -> None:
+    """With no match anywhere, report the artist that came closest, not the last tried."""
+    client = FakeClient()
+    client.user_response = empty_user_response()
+    client.artist_name_responses["Harold Budd & Clive Wright"] = RedArtistResponse(
+        status="success",
+        response=RedArtistResponseResults(
+            id=999, name="Harold Budd & Clive Wright", torrentgroup=[]
+        ),
+    )
+    client.artist_name_responses["Harold Budd"] = RedArtistResponse(
+        status="success",
+        response=RedArtistResponseResults(
+            id=111, name="Harold Budd", torrentgroup=[make_group("Candylion", 2009, group_id=555)]
+        ),
+    )
+
+    album = make_album(
+        albumartist="Harold Budd & Clive Wright",
+        albumartist_sort="",
+        album="Something Else Entirely",
+        year=2009,
+    )
+    result = search_album(album, client, log, min_score=0.75)
+
+    assert result.outcome is SearchOutcome.NO_ALBUM_MATCH
+    assert result.artist_id == 111  # Harold Budd scored higher than the empty page
