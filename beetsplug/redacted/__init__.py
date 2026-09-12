@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Beets plugin for Redacted integration."""
 
+import os
 import time
 from pkgutil import extend_path
 from typing import Optional
@@ -80,7 +81,7 @@ class RedactedPlugin(BeetsPlugin):
 
     def _get_client(self, http_client: HTTPClient) -> Optional[Client]:
         """Get or create the RedactedClient instance."""
-        api_key = self.config["api_key"].get()
+        api_key = self.config["api_key"].get() or os.environ.get("RED_API_KEY")
         if not api_key:
             self._log.warning("redacted: api_key not set in configuration.")
             return None

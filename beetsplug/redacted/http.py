@@ -18,7 +18,9 @@ PERIOD_SECONDS = 10
 CALLS_PER_PERIOD = 5
 
 # Cache configuration
-CACHE_DIR = "/tmp/redacted"
+# Persistent (not /tmp — that is tmpfs on many systems and wiped on reboot, which
+# would re-hammer the RED API on the next `beet redacted` run).
+CACHE_DIR = os.path.expanduser("~/.cache/redacted")
 CACHE_EXPIRY = timedelta(days=7)
 
 
