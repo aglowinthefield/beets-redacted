@@ -1,6 +1,7 @@
 """Module for searching and matching albums against Redacted torrents."""
 
 import dataclasses
+import enum
 import functools
 import itertools
 import logging
@@ -12,7 +13,8 @@ from pydantic import ValidationError
 from ratelimit import RateLimitException  # type: ignore[import-untyped]
 
 from beetsplug.redacted.client import Client
-from beetsplug.redacted.exceptions import RedactedError
+from beetsplug.redacted.exceptions import RedactedAPIFailure, RedactedError
+from beetsplug.redacted.aliases import AliasProvider
 from beetsplug.redacted.matching import Matchable, extract_album_fields, score_match
 from beetsplug.redacted.types import (
     BeetsRedFields,
@@ -25,6 +27,7 @@ from beetsplug.redacted.types import (
     TorrentType,
 )
 from beetsplug.redacted.utils.search_utils import normalize_query
+from beetsplug.redacted.utils.text import normalize, split_artists
 
 
 @dataclasses.dataclass
@@ -246,34 +249,36 @@ def match_album(
     return best_match, best_match_score
 
 
-def match_artist_album(
+def match_artist_album_scored(
     album: Album,
     artist_response: RedArtistResponse,
     preferred_torrents: list[RedTorrent],
     log: logging.Logger,
     min_score: float,
-) -> tuple[Union[RedArtistTorrentGroup, None], Union[RedArtistTorrent, None]]:
-    """Match an album against artist's torrent groups.
+    alt_artists: Optional[list[str]] = None,
+) -> tuple[Union[RedArtistTorrentGroup, None], Union[RedArtistTorrent, None], float]:
+    """Match an album against an artist's torrent groups, returning the match score.
 
     Args:
         album: Beets album to match
         artist_response: Artist data from Redacted API
+        preferred_torrents: Torrents already known to be in the user's collection
         log: Logger instance for logging messages
         min_score: Minimum similarity score to consider a match (0-1)
+        alt_artists: Additional names for the album's artist, e.g. MusicBrainz aliases
 
     Returns:
-        Tuple of (matching group, matching torrent) if found with sufficient similarity,
-        None otherwise.
+        Tuple of (matching group, matching torrent, score). The group and torrent are
+        None when nothing scored above min_score.
     """
-    # Extract album fields for matching
-    album_fields = extract_album_fields(album)
+    album_fields = extract_album_fields(album, alt_artists=alt_artists)
 
     artist_data = artist_response.response
     torrent_groups = artist_data.torrentgroup
 
     if not torrent_groups:
         log.debug("Artist {:s} has no torrent groups", artist_data.name)
-        return None, None
+        return None, None, 0.0
 
     # Find the best match among all artist's torrent groups
     best_group: Union[RedArtistTorrentGroup, None] = None
@@ -296,10 +301,7 @@ def match_artist_album(
         # If this group has the preferred torrent ID, use it as the best match
         preferred_torrent = next((t for t in group.torrent if t.id in pt_ids), None)
         if preferred_torrent:
-            best_group = group
-            best_torrent = preferred_torrent
-            best_match_score = 1.0
-            break
+            return group, preferred_torrent, 1.0
 
         group_fields = artist_torrent_group_matchable(group, artist_data.name)
         if not group_fields:
@@ -327,15 +329,14 @@ def match_artist_album(
     if not best_group or not best_torrent:
         log.debug(
             "No match with torrents found in artist {0}'s groups (checked {1:d} groups, "
-            "best score: {2:.2f}). Artist response: id={3:d}, name={4}, groups={5}",
+            "best score: {2:.2f}). Artist response: id={3:d}, name={4}",
             artist_data.name,
             len(torrent_groups),
             best_match_score,
             artist_data.id,
             artist_data.name,
-            [(g.groupId, g.groupName, g.groupYear) for g in torrent_groups if g.groupName],
         )
-        return None, None
+        return None, None, best_match_score
 
     if best_match_score < min_score:
         log.debug(
@@ -346,7 +347,7 @@ def match_artist_album(
             best_match_score,
             min_score,
         )
-        return None, None
+        return None, None, best_match_score
 
     log.debug(
         "Best match for {0} from artist's groups: {1} (score: {2:.2f})",
@@ -355,7 +356,25 @@ def match_artist_album(
         best_match_score,
     )
 
-    return best_group, best_torrent
+    return best_group, best_torrent, best_match_score
+
+
+def match_artist_album(
+    album: Album,
+    artist_response: RedArtistResponse,
+    preferred_torrents: list[RedTorrent],
+    log: logging.Logger,
+    min_score: float,
+    alt_artists: Optional[list[str]] = None,
+) -> tuple[Union[RedArtistTorrentGroup, None], Union[RedArtistTorrent, None]]:
+    """Match an album against artist's torrent groups.
+
+    Thin wrapper over match_artist_album_scored that drops the score.
+    """
+    group, torrent, _ = match_artist_album_scored(
+        album, artist_response, preferred_torrents, log, min_score, alt_artists
+    )
+    return group, torrent
 
 
 def beets_fields_from_artist_torrent_groups(
@@ -466,122 +485,234 @@ def best_match_from_search(
     return match_album(album, itertools.chain.from_iterable(results), log)
 
 
-def search(
-    album: Album, client: Client, log: logging.Logger, min_score: float
-) -> Union[BeetsRedFields, None]:
-    """Search for Redacted torrents matching an album using a two-step process.
+class SearchOutcome(enum.Enum):
+    """Why a search ended the way it did.
 
-    First searches for torrents using the browse API, then looks up artist details
-    for more accurate matching.
-
-    Args:
-        album: Album to search for
-        client: RedactedClient instance
-        log: Logger instance for logging messages
-        min_score: Minimum similarity score to consider a match (0-1)
-
-    Returns:
-        Dictionary of fields to update on the album if match found, None otherwise
+    The distinction matters for finding albums that are *not* on Redacted: a missing
+    red_groupid on its own is ambiguous between "the tracker does not have this" and
+    "the lookup failed". Only NO_ARTIST and NO_ALBUM_MATCH are positive evidence of
+    absence; ERROR means the album's status is still unknown and should be retried.
     """
-    # Find the best matching torrent, from the user's snatches or search, which we'll then use
-    # to look up the artist and get the best match from the artist's discography.
 
-    def matchers() -> Generator[Callable[[], tuple[Optional[RedTorrent], float]], None, None]:
-        # First try to match from the user's snatched torrents
-        yield functools.partial(best_match_from_snatched, client, album, log)
+    MATCHED = "matched"
+    NO_ALBUM_MATCH = "no_album_match"  # Artist is on Redacted, this release is not
+    NO_ARTIST = "no_artist"  # Redacted has no such artist under any known name
+    ERROR = "error"  # Lookup failed; nothing can be concluded
 
-        # Then try to match from the search results, using variations of the artist and album names,
-        # starting with the most likely.
-        for c_artist, c_album in itertools.product(
-            (
-                album.albumartist,
-                album.albumartist_credit,
-                album.albumartist_sort,
-                album.albumartists,
-            ),
-            (album.album, album.albumdisambig),
-        ):
-            yield functools.partial(best_match_from_search, client, album, c_artist, c_album, log)
 
-    best_match = None
-    best_match_score = 0.0
-    best_matcher = None
-    preferred_torrents = []
-    for matcher in matchers():
+@dataclasses.dataclass
+class SearchResult:
+    """Outcome of searching Redacted for one album."""
+
+    outcome: SearchOutcome
+    fields: Optional[BeetsRedFields] = None
+    score: float = 0.0
+    artist_id: Optional[int] = None
+    artist_name: Optional[str] = None
+
+
+def candidate_artist_names(
+    album: Album, alt_artists: Optional[list[str]] = None, limit: int = 8
+) -> list[str]:
+    """Build an ordered list of names to look this album's artist up under.
+
+    Beets' own spellings come first, then MusicBrainz aliases (which supply the other
+    script for e.g. Hiroshi Yoshimura / 吉村弘), then the individual members of a
+    multi-artist credit. Names are de-duplicated by normalized form so trivial
+    punctuation differences don't cost an API call.
+    """
+    raw: list[str] = []
+
+    def add(value: object) -> None:
+        if not value:
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                add(item)
+            return
+        text = str(value).strip()
+        if text:
+            raw.append(text)
+
+    add(album.get("albumartist", None))
+    add(alt_artists or [])
+    add(album.get("albumartists", None))
+    add(album.get("albumartist_credit", None))
+    add(album.get("albumartist_sort", None))
+
+    # A credit like "Hiroshi Yoshimura; KOTO VORTEX" won't resolve as a whole, but its
+    # members will.
+    expanded = list(raw)
+    for name in raw:
+        expanded.extend(split_artists(name))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in expanded:
+        key = normalize(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def resolve_artist_by_name(
+    client: Client, names: list[str], log: logging.Logger
+) -> tuple[Optional[RedArtistResponse], Optional[str], bool]:
+    """Find an artist on Redacted by trying each candidate name in turn.
+
+    Redacted resolves its own artist aliases, so any registered spelling reaches the
+    same artist page. Returns the first hit, the name that found it, and whether any
+    attempt failed for a reason other than "no such artist" (which would make a
+    negative result untrustworthy).
+    """
+    saw_error = False
+    for name in names:
         try:
-            match, score = matcher()
+            response = client.get_artist_by_name(name)
+        except RedactedAPIFailure:
+            log.debug("Redacted has no artist named {0}", name)
+            continue
         except (RedactedError, RateLimitException) as e:
-            log.debug(
-                "Error retrieving torrents for artist '{0}', album '{1}' "
-                "with matcher function {2}: {3}",
-                album.albumartist,
-                album.album,
-                matcher,
-                e,
-            )
+            log.debug("Error looking up Redacted artist by name {0}: {1}", name, e)
+            saw_error = True
             continue
 
-        if match and score > best_match_score:
-            best_match = match
-            best_match_score = score
-            best_matcher = matcher
+        if response and response.response and response.response.id:
+            log.debug(
+                "Resolved Redacted artist {0} (id {1}) from name {2}",
+                response.response.name,
+                response.response.id,
+                name,
+            )
+            return response, name, saw_error
 
-        if match and match.preferred:
-            preferred_torrents.append(match)
+    return None, None, saw_error
 
-    if not best_match or best_match_score < min_score:
-        log.debug(
-            "No good search result for {0} - {1} ({2:d}) (min {3:.2f}, best was {4:.2f})",
-            album.get("albumartist"),
-            album.get("album"),
-            album.get("year", 0),
-            min_score,
-            best_match_score,
-        )
-        return None
-    else:
-        log.debug(
-            "Matched good search result for {0} - {1} ({2:d}) (min {3:.2f}, best was {4:.2f}) "
-            "using matcher {5}",
-            album.get("albumartist"),
-            album.get("album"),
-            album.get("year", 0),
-            min_score,
-            best_match_score,
-            best_matcher,
-        )
 
-    # Extract artist ID for detailed lookup
-    artist_id = best_match.artist_id
-    if not artist_id:
-        # No artist ID means we can't do the second step of the lookup
-        # According to requirements, we should return None in this case
-        log.debug(
-            "No artist ID found in snatches or search results, best match was {0}", best_match
-        )
-        return None
+def search_album(
+    album: Album,
+    client: Client,
+    log: logging.Logger,
+    min_score: float,
+    aliases: Optional[AliasProvider] = None,
+) -> SearchResult:
+    """Search Redacted for an album, reporting why the search ended as it did.
 
-    # Look up artist details for better matching
+    Resolution is artist-first: look the artist up by each name we know for them, which
+    is both cheaper and far more reliable than free-text search, then match the release
+    within that artist's discography. The old free-text 'browse' search remains as a
+    fallback for artists Redacted has under a name we don't hold.
+    """
+    alt_artists: list[str] = []
+    if aliases is not None:
+        alt_artists = aliases.aliases_for_album(album)
+
+    saw_error = False
+
+    # Snatched torrents are strong evidence: the user already has this release, so a
+    # hit here both identifies the artist and pins the exact torrent.
+    preferred_torrents: list[RedTorrent] = []
+    snatched_artist_id: Optional[int] = None
     try:
-        log.debug("Looking up artist details for artist {0:d}", artist_id)
-        artist_data = client.get_artist(artist_id)
+        snatched_match, snatched_score = best_match_from_snatched(client, album, log)
+        # Only trust a snatch that clears the threshold: the best of the user's snatched
+        # torrents is still returned when it is a poor match, and following its artist id
+        # would send the discography lookup to the wrong artist entirely.
+        if snatched_match and snatched_score >= min_score:
+            preferred_torrents.append(snatched_match)
+            snatched_artist_id = snatched_match.artist_id
     except (RedactedError, RateLimitException) as e:
-        # Artist lookup failed, return None per requirements
-        log.debug("Error looking up artist {0:d}: {1}", artist_id, e)
-        return None
+        log.debug("Error retrieving snatched torrents: {0}", e)
+        saw_error = True
 
-    # Find a match for the album in the artist's discography
-    artist_group, artist_torrent = match_artist_album(
-        album, artist_data, preferred_torrents, log, min_score
+    # Primary strategy: resolve the artist directly by name.
+    names = candidate_artist_names(album, alt_artists)
+    log.debug("Artist name candidates for {0}: {1}", album.get("album"), names)
+    artist_response, matched_name, name_error = resolve_artist_by_name(client, names, log)
+    saw_error = saw_error or name_error
+
+    # Fallback: free-text search, used only to discover an artist id.
+    if artist_response is None:
+        artist_id: Optional[int] = snatched_artist_id
+
+        if artist_id is None:
+            for c_artist, c_album in itertools.product(
+                (album.albumartist, album.albumartist_credit, album.albumartist_sort),
+                (album.album, album.albumdisambig),
+            ):
+                if not c_artist or not c_album:
+                    continue
+                try:
+                    match, score = best_match_from_search(client, album, c_artist, c_album, log)
+                except (RedactedError, RateLimitException) as e:
+                    log.debug("Error searching for {0} - {1}: {2}", c_artist, c_album, e)
+                    saw_error = True
+                    continue
+                if match and score >= min_score and match.artist_id:
+                    artist_id = match.artist_id
+                    break
+
+        if artist_id is None:
+            outcome = SearchOutcome.ERROR if saw_error else SearchOutcome.NO_ARTIST
+            log.debug(
+                "No Redacted artist found for {0} - {1} ({2})",
+                album.get("albumartist"),
+                album.get("album"),
+                outcome.value,
+            )
+            return SearchResult(outcome=outcome)
+
+        try:
+            artist_response = client.get_artist(artist_id)
+        except (RedactedError, RateLimitException) as e:
+            log.debug("Error looking up artist {0}: {1}", artist_id, e)
+            return SearchResult(outcome=SearchOutcome.ERROR)
+
+    artist_data = artist_response.response
+    group, torrent, score = match_artist_album_scored(
+        album, artist_response, preferred_torrents, log, min_score, alt_artists
     )
-    if artist_group and artist_torrent:
-        # Extract album update fields from artist group (album) and torrent match
-        return beets_fields_from_artist_torrent_groups(
-            artist_data.response, artist_group, artist_torrent, log
-        )
 
-    # If there is no match among the artist's information, we consider this to be an error condition
+    if group and torrent:
+        fields = beets_fields_from_artist_torrent_groups(artist_data, group, torrent, log)
+        if fields is not None:
+            return SearchResult(
+                outcome=SearchOutcome.MATCHED,
+                fields=fields,
+                score=score,
+                artist_id=artist_data.id,
+                artist_name=artist_data.name,
+            )
+        log.debug("Could not build Beets fields for {0}, treating as no match", album.get("album"))
+
     log.debug(
-        "No match found in artist's discography for {0} - {1}", album.albumartist, album.album
+        "Redacted artist {0} has no release matching {1} (best score {2:.2f})",
+        artist_data.name,
+        album.get("album"),
+        score,
     )
-    return None
+    return SearchResult(
+        outcome=SearchOutcome.ERROR if saw_error else SearchOutcome.NO_ALBUM_MATCH,
+        score=score,
+        artist_id=artist_data.id,
+        artist_name=artist_data.name,
+    )
+
+
+def search(
+    album: Album,
+    client: Client,
+    log: logging.Logger,
+    min_score: float,
+    aliases: Optional[AliasProvider] = None,
+) -> Union[BeetsRedFields, None]:
+    """Search for Redacted torrents matching an album.
+
+    Returns the fields to set on the album, or None if there was no match. Callers that
+    need to tell "not on Redacted" apart from "lookup failed" should use search_album.
+    """
+    return search_album(album, client, log, min_score, aliases).fields

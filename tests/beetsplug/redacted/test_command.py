@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from beetsplug.redacted.command import RedactedCommand
+from beetsplug.redacted.search import SearchOutcome, SearchResult
 from beetsplug.redacted.search import BeetsRedFields
 from beetsplug.redacted.utils.test_utils import (
     FakeAlbum,
@@ -154,13 +155,17 @@ def test_command_with_unchanged_search_results_does_not_modify_albums(
     command = RedactedCommand(config, log, client)
 
     # Mock search functions to return same values as album
-    with patch("beetsplug.redacted.command.search") as mock_search:
+    with patch("beetsplug.redacted.command.search_album") as mock_search:
         # These should match the album's existing values.
         album = lib_with_red_groupid.albums()[0]
         assert album.red_groupid == 1
         assert album.red_torrentid == 2
 
-        mock_search.return_value = BeetsRedFields(red_groupid=1, red_torrentid=2)
+        mock_search.return_value = SearchResult(
+            outcome=SearchOutcome.MATCHED,
+            fields=BeetsRedFields(red_groupid=1, red_torrentid=2),
+            score=1.0,
+        )
 
         # Execute command with force=True so that the album will still be queried.
         result = command.func(lib_with_red_groupid, Values({"force": True}), [])
@@ -186,8 +191,12 @@ def test_command_with_force(
     assert result["total"] == 0
 
     # Mock search functions to return values (to simulate finding matches)
-    with patch("beetsplug.redacted.command.search") as mock_search:
-        mock_search.return_value = BeetsRedFields(red_groupid=1, red_torrentid=2)
+    with patch("beetsplug.redacted.command.search_album") as mock_search:
+        mock_search.return_value = SearchResult(
+            outcome=SearchOutcome.MATCHED,
+            fields=BeetsRedFields(red_groupid=1, red_torrentid=2),
+            score=1.0,
+        )
 
         # Verify that the same album is processed with force=True
         result = command.func(lib_with_red_groupid, Values({"force": True}), [])
@@ -226,10 +235,14 @@ def test_command_with_matches(
 ) -> None:
     """Test command with matching albums."""
     # Mock the search functions to return fake matches
-    with patch("beetsplug.redacted.command.search") as mock_search:
+    with patch("beetsplug.redacted.command.search_album") as mock_search:
 
         # Set up mock return values
-        mock_search.return_value = BeetsRedFields(red_groupid=1, red_torrentid=1)
+        mock_search.return_value = SearchResult(
+            outcome=SearchOutcome.MATCHED,
+            fields=BeetsRedFields(red_groupid=1, red_torrentid=1),
+            score=1.0,
+        )
 
         command = RedactedCommand(config, log, FakeClient())
         result = command.func(lib_with_album, Values(), [])
@@ -245,10 +258,14 @@ def test_command_pretend_mode(
 ) -> None:
     """Test command in pretend mode shows changes without making them."""
     # Mock the search functions to return fake matches for pretend mode test
-    with patch("beetsplug.redacted.command.search") as mock_search:
+    with patch("beetsplug.redacted.command.search_album") as mock_search:
 
         # Set up mock return values
-        mock_search.return_value = BeetsRedFields(red_groupid=1, red_torrentid=1)
+        mock_search.return_value = SearchResult(
+            outcome=SearchOutcome.MATCHED,
+            fields=BeetsRedFields(red_groupid=1, red_torrentid=1),
+            score=1.0,
+        )
 
         command = RedactedCommand(config, log, FakeClient())
         # Execute command in pretend mode

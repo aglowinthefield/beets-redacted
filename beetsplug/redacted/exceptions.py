@@ -17,3 +17,14 @@ class RedactedRateLimitError(RedactedError):
             message: Error message.
         """
         super().__init__(message)
+
+
+class RedactedAPIFailure(RedactedError):
+    """Raised when Redacted answers successfully but reports a failure status.
+
+    Distinct from a transport error: the tracker was reached and said no. For an artist
+    lookup that means "no such artist here", which is a real answer worth recording,
+    whereas an HTTP or network error leaves the album's status genuinely unknown.
+    """
+
+    pass

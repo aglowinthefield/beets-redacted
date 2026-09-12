@@ -555,6 +555,9 @@ class FakeClient(Client):
         self.artist_queries: list[int] = []
         self.error_artist_queries: set[int] = set()
         self.rate_limit_artist_queries: set[int] = set()
+        self.artist_name_responses: dict[str, RedArtistResponse] = {}
+        self.artist_name_queries: list[str] = []
+        self.error_artist_name_queries: set[str] = set()
 
     def search(self, query: str) -> RedSearchResponse:
         """Fake implementation of browse method.
@@ -578,6 +581,19 @@ class FakeClient(Client):
         return self.search_responses.get(
             query, RedSearchResponse(status="success", response=RedSearchResults(results=[]))
         )
+
+    def get_artist_by_name(self, artist_name: str) -> RedArtistResponse:
+        """Fake implementation of get_artist_by_name.
+
+        Unknown names raise, mirroring Redacted's 'failure' status for an artist it
+        does not have, so tests exercise the fallback to the browse search.
+        """
+        self.artist_name_queries.append(artist_name)
+        if artist_name in self.error_artist_name_queries:
+            raise RedactedError(f"Error looking up artist {artist_name}")
+        if artist_name not in self.artist_name_responses:
+            raise RedactedError(f"No artist found named {artist_name}")
+        return self.artist_name_responses[artist_name]
 
     def get_artist(self, artist_id: int) -> RedArtistResponse:
         """Fake implementation of get_artist method.

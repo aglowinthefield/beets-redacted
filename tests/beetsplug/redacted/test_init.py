@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from beetsplug.redacted import RedactedPlugin
+from beetsplug.redacted.search import SearchOutcome, SearchResult
 from beetsplug.redacted.types import BeetsRedFields
 from beetsplug.redacted.utils.test_utils import (
     FakeAlbum,
@@ -93,8 +94,8 @@ def test_import_stage_no_match_skips(log: FakeLogger, test_album: FakeAlbum) -> 
     task = FakeImportTask(album=test_album, is_album=True)
 
     # Mock search function to return None (no match)
-    with patch("beetsplug.redacted.search") as mock_search:
-        mock_search.return_value = None
+    with patch("beetsplug.redacted.search_album") as mock_search:
+        mock_search.return_value = SearchResult(outcome=SearchOutcome.NO_ALBUM_MATCH)
 
         # Call the import_stage method
         plugin.import_stage(None, task)
@@ -117,12 +118,14 @@ def test_import_stage_with_match_applies_fields(log: FakeLogger, test_album: Fak
     current_time = time.time()
 
     # Mock search function to return fields
-    with patch("beetsplug.redacted.search") as mock_search:
+    with patch("beetsplug.redacted.search_album") as mock_search:
         # Create fields to return from search
         red_fields = BeetsRedFields(
             red_groupid=123, red_torrentid=456, red_format="FLAC", red_encoding="Lossless"
         )
-        mock_search.return_value = red_fields
+        mock_search.return_value = SearchResult(
+            outcome=SearchOutcome.MATCHED, fields=red_fields, score=1.0
+        )
 
         # Call the import_stage method
         plugin.import_stage(None, task)
@@ -152,10 +155,12 @@ def test_import_stage_with_unchanged_fields_no_update(
     task = FakeImportTask(album=test_album, is_album=True)
 
     # Mock search function to return the same fields
-    with patch("beetsplug.redacted.search") as mock_search:
+    with patch("beetsplug.redacted.search_album") as mock_search:
         # Create fields to return from search with same values
         red_fields = BeetsRedFields(red_groupid=123)
-        mock_search.return_value = red_fields
+        mock_search.return_value = SearchResult(
+            outcome=SearchOutcome.MATCHED, fields=red_fields, score=1.0
+        )
 
         # Call the import_stage method
         plugin.import_stage(None, task)

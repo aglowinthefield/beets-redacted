@@ -11,8 +11,9 @@ import enlighten  # type: ignore[import-untyped]
 from beets import ui  # type: ignore[import-untyped]
 from beets.library import Library  # type: ignore[import-untyped]
 
+from beetsplug.redacted.aliases import AliasProvider
 from beetsplug.redacted.client import Client
-from beetsplug.redacted.search import search
+from beetsplug.redacted.search import SearchOutcome, search_album
 
 
 def command_func(
@@ -22,6 +23,7 @@ def command_func(
     args: list[str],
     client: Client,
     log: logging.Logger,
+    aliases: Optional[AliasProvider] = None,
 ) -> dict[str, int]:
     """Execute the redacted command.
 
@@ -36,9 +38,12 @@ def command_func(
     # Get the Beets database query from args
     query = " ".join(args) if args else ""
 
-    # Filter query to only include albums without red_groupid if force=False
+    # Without --force, skip albums that already matched and albums already looked up
+    # and found absent. red_checked is what makes the second half possible: previously
+    # every run re-searched every unmatched album, including ones Redacted simply does
+    # not have.
     if not opts.ensure_value("force", False):
-        query = f"{query} red_groupid::^$"
+        query = f"{query} red_groupid::^$ red_checked::^$"
 
     # Get the albums to process from the Beets database
     query = query.strip()
@@ -46,6 +51,7 @@ def command_func(
 
     n_modified = 0
     n_total = len(albums)
+    outcomes: dict[str, int] = {}
 
     # Set up progress bars with a shared manager. Disable progress bars in tests,
     # as they fail during pytest on Windows. The output terminal in Windows under
@@ -58,24 +64,37 @@ def command_func(
             c_modified = c_unmodified.add_subcounter("blue")
 
             for album in albums:
-                # Search for matching torrents
-                red_fields = search(album, client, log, opts.min_score)
-                if red_fields is None:
-                    # No match found, so we skip this album
+                result = search_album(album, client, log, opts.min_score, aliases)
+                outcomes[result.outcome.value] = outcomes.get(result.outcome.value, 0) + 1
+
+                # An ERROR leaves the album's status genuinely unknown, so record
+                # nothing and let the next run try again.
+                if result.outcome is SearchOutcome.ERROR:
                     c_unmodified.update()
                     continue
 
                 with lib.transaction():
                     old = album.copy()
 
-                    # Apply fields from torrent and request matches
+                    # Stamp the outcome even when nothing matched: that is the record
+                    # saying "Redacted was asked about this album and did not have it".
+                    album.red_checked = time.time()
+                    album.red_status = result.outcome.value
+                    album.red_score = result.score
+
+                    # Only real Redacted metadata counts as a modification. The stamp
+                    # above changes on every run, so folding it in would report every
+                    # album as modified and print a diff for each one.
                     modified = False
-                    for key, value in red_fields.__dict__.items():
-                        if album.get(key) != value:
-                            album[key] = value
-                            modified = True
+                    if result.fields is not None:
+                        for key, value in result.fields.__dict__.items():
+                            if album.get(key) != value:
+                                album[key] = value
+                                modified = True
 
                     if not modified:
+                        if not opts.pretend:
+                            album.store()
                         c_unmodified.update()
                         continue
 
@@ -88,13 +107,30 @@ def command_func(
                         n_modified += 1
                         album.red_mtime = time.time()
                         album.store()
-    return {"modified": n_modified, "unmodified": n_total - n_modified, "total": n_total}
+    if outcomes:
+        log.info(
+            "redacted: {0}",
+            ", ".join(f"{name}: {count}" for name, count in sorted(outcomes.items())),
+        )
+
+    return {
+        "modified": n_modified,
+        "unmodified": n_total - n_modified,
+        "total": n_total,
+        **outcomes,
+    }
 
 
 class RedactedCommand(ui.Subcommand):
     """Command for searching and updating Redacted information for library albums."""
 
-    def __init__(self, config: Any, log: logging.Logger, client: Optional[Client] = None) -> None:
+    def __init__(
+        self,
+        config: Any,
+        log: logging.Logger,
+        client: Optional[Client] = None,
+        aliases: Optional[AliasProvider] = None,
+    ) -> None:
         """Initialize the command.
 
         Args:
@@ -105,6 +141,7 @@ class RedactedCommand(ui.Subcommand):
         self.config = config
         self.log = log
         self.client = client
+        self.aliases = aliases
 
         default_opts = {
             "min_score": config["min_score"].as_number(),
@@ -155,7 +192,7 @@ class RedactedCommand(ui.Subcommand):
                 assert self.client is not None
 
                 opts = ensure_values(opts, default_opts)
-                return command_func(self, lib, opts, args, self.client, self.log)
+                return command_func(self, lib, opts, args, self.client, self.log, self.aliases)
 
             self.func = func
         else:

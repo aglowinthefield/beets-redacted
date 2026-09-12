@@ -12,10 +12,11 @@ from beets.importer import ImportTask  # type: ignore[import-untyped]
 from beets.library import Library  # type: ignore[import-untyped]
 from beets.plugins import BeetsPlugin  # type: ignore[import-untyped]
 
+from beetsplug.redacted.aliases import AliasProvider
 from beetsplug.redacted.client import Client
 from beetsplug.redacted.command import RedactedCommand
 from beetsplug.redacted.http import CachedRequestsClient, HTTPClient
-from beetsplug.redacted.search import search
+from beetsplug.redacted.search import SearchOutcome, search_album
 
 __path__ = extend_path(__path__, __name__)
 
@@ -29,6 +30,13 @@ class RedactedPlugin(BeetsPlugin):
         {
             "red_groupid": dbtypes.INTEGER,
             "red_mtime": dbtypes.FLOAT,
+            # When this album was last looked up, and what came back. A missing
+            # red_groupid alone can't distinguish "not on Redacted" from "never
+            # searched" or "the search errored", which is exactly the distinction
+            # needed to find albums worth uploading.
+            "red_checked": dbtypes.FLOAT,
+            "red_status": dbtypes.STRING,
+            "red_score": dbtypes.FLOAT,
             "red_torrentid": dbtypes.INTEGER,
             "red_remastered": dbtypes.BOOLEAN,
             "red_remasteryear": dbtypes.INTEGER,
@@ -60,7 +68,16 @@ class RedactedPlugin(BeetsPlugin):
     )
 
     default_config = frozendict.frozendict(
-        {"api_key": None, "user_id": None, "min_score": 0.75, "auto": False}
+        {
+            "api_key": None,
+            "user_id": None,
+            "min_score": 0.75,
+            "auto": False,
+            # Look up artist aliases on MusicBrainz, so a release credited in one
+            # script matches a Redacted artist credited in another.
+            "aliases": True,
+            "alias_cache_dir": None,
+        }
     )
 
     def __init__(self) -> None:
@@ -72,6 +89,13 @@ class RedactedPlugin(BeetsPlugin):
 
         self._http_client = CachedRequestsClient(self.BASE_URL, self._log)
         self._client = self._get_client(self._http_client)
+
+        cache_dir = self.config["alias_cache_dir"].get() or os.path.expanduser(
+            "~/.cache/redacted/aliases"
+        )
+        self._aliases = AliasProvider(
+            self._log, cache_dir=str(cache_dir), enabled=self.config["aliases"].get(bool)
+        )
 
         # Register import stage if 'auto' is True
         if self._client and self.config["auto"].get(bool):
@@ -98,6 +122,7 @@ class RedactedPlugin(BeetsPlugin):
     def cleanup(self) -> None:
         """Clean up resources when Beets is shutting down."""
         self._http_client.close()
+        self._aliases.close()
 
     def import_stage(self, _: Library, task: ImportTask) -> bool:
         """Process an album during import.
@@ -115,21 +140,31 @@ class RedactedPlugin(BeetsPlugin):
             return False
 
         album = task.album
-        red_fields = search(album, self._client, self._log, self._min_score)
-        if not red_fields:
-            return False
+        result = search_album(album, self._client, self._log, self._min_score, self._aliases)
 
-        # Apply the Redacted fields to the album
-        modified = False
-        for key, value in red_fields.__dict__.items():
-            if album.get(key) != value:
-                album[key] = value
-                modified = True
+        # Record that a lookup happened and what it concluded, even when nothing
+        # matched, so albums absent from Redacted are distinguishable from unsearched
+        # ones without re-querying the API.
+        stamped = False
+        if result.outcome is not SearchOutcome.ERROR:
+            album.red_checked = time.time()
+            album.red_status = result.outcome.value
+            album.red_score = result.score
+            stamped = True
 
-        if modified:
+        # red_mtime records when the Redacted metadata last changed, so it must not be
+        # bumped by the bookkeeping stamp above, which changes on every single run.
+        fields_changed = False
+        if result.fields:
+            for key, value in result.fields.__dict__.items():
+                if album.get(key) != value:
+                    album[key] = value
+                    fields_changed = True
+
+        if fields_changed:
             album.red_mtime = time.time()
 
-        return modified
+        return fields_changed or stamped
 
     def commands(self) -> list[RedactedCommand]:
         """Get the commands provided by this plugin.
@@ -137,4 +172,4 @@ class RedactedPlugin(BeetsPlugin):
         Returns:
             List of commands.
         """
-        return [RedactedCommand(self.config, self._log, self._client)]
+        return [RedactedCommand(self.config, self._log, self._client, self._aliases)]

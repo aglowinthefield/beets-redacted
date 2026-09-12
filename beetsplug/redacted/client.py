@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from pydantic import ValidationError
 
-from .exceptions import RedactedError
+from .exceptions import RedactedAPIFailure, RedactedError
 from .http import HTTPClient
 from .types import (
     Action,
@@ -72,7 +72,7 @@ class Client:
             raise RedactedError("Invalid JSON response from API") from e
 
         if data.get("status") != "success":
-            raise RedactedError(f"API error: {data.get('error', 'Unknown error')}")
+            raise RedactedAPIFailure(f"API error: {data.get('error', 'Unknown error')}")
 
         return data
 
@@ -291,10 +291,36 @@ class Client:
         Raises:
             RedactedError: If the response is not in the expected format or indicates failure.
         """
-        response = self._make_api_request(Action.ARTIST, {"id": str(artist_id)})
+        return self._artist_request({"id": str(artist_id)})
+
+    def get_artist_by_name(self, artist_name: str) -> RedArtistResponse:
+        """Get detailed information about an artist by name.
+
+        URL: ajax.php?action=artist&artistname=<Artist Name>
+
+        Redacted resolves artist aliases server-side, so a name in either script finds
+        the same artist: both "Hiroshi Yoshimura" and "吉村弘" return artist 53689,
+        canonically named "Hiroshi Yoshimura (吉村弘)". That makes this the most direct
+        way to reach an artist's discography when the free-text 'browse' search fails
+        because the library and the tracker spell the artist differently.
+
+        Args:
+            artist_name: The artist name to look up.
+
+        Returns:
+            Detailed artist information including releases and statistics.
+
+        Raises:
+            RedactedError: If the artist is unknown or the response is malformed.
+        """
+        return self._artist_request({"artistname": artist_name})
+
+    def _artist_request(self, params: dict[str, str]) -> RedArtistResponse:
+        """Issue an 'artist' API request and parse the response."""
+        response = self._make_api_request(Action.ARTIST, params)
 
         if response["status"] == "failure":
-            raise RedactedError(f"API error: {response.get('error', 'Unknown error')}")
+            raise RedactedAPIFailure(f"API error: {response.get('error', 'Unknown error')}")
 
         try:
             return RedArtistResponse(**response)
