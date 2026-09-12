@@ -119,6 +119,30 @@ def best_similarity(a_forms: list[str], b_forms: list[str]) -> float:
     return full
 
 
+# An inexact title match must also share this proportion of its words. Character
+# similarity alone is unreliable on short or partly-shared titles: "Revise" scores 0.67
+# against the unrelated "Everis", and "Hide (Amtrac Remix)" 0.72 against "UNKLE x Amtrac
+# - Remixes". Across the releases verified by hand against Redacted, genuine inexact
+# matches share at least 0.50 of their words and false ones at most 0.43.
+MIN_TOKEN_OVERLAP = 0.45
+
+# Below this many words, token overlap is too coarse to use -- one differing word in a
+# two-word title drops it to 0.33, which would reject "Colours" against "Colors". Short
+# titles are held to a high character similarity instead, which is what separates a
+# spelling difference from a coincidence: "Colours"/"Colors" scores 0.92 while
+# "Revise"/"Everis" scores 0.67.
+MIN_WORDS_FOR_TOKEN_GATE = 3
+MIN_SHORT_TITLE_SIMILARITY = 0.85
+
+
+def token_overlap(a: str, b: str) -> float:
+    """Proportion of words two names share, over the words they use between them."""
+    words_a, words_b = set(normalize(a).split()), set(normalize(b).split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
 def year_similarity(year1: Union[int, None], year2: Union[int, None]) -> float:
     """Calculate year similarity.
 
@@ -221,6 +245,19 @@ def score_match(
     if len(works1) > 1 and len(works2) > 1:
         overlap = len(works1 & works2) / len(works1 | works2)
         scores["title"] = max(scores["title"], overlap)
+
+    # An exact rendering match is trusted as-is: that is what carries the cross-script
+    # cases, where the two titles share few or no words ("静けさの本" against
+    # "静けさの本: Static for Piano"). Anything less has to agree on words too.
+    if scores["title"] < 1.0:
+        words1 = normalize(item1.title).split()
+        words2 = normalize(item2.title).split()
+        if max(len(words1), len(words2)) >= MIN_WORDS_FOR_TOKEN_GATE:
+            shared_words = token_overlap(item1.title, item2.title)
+            if shared_words < MIN_TOKEN_OVERLAP:
+                scores["title"] = min(scores["title"], shared_words)
+        elif scores["title"] < MIN_SHORT_TITLE_SIMILARITY:
+            scores["title"] *= 0.5
 
     # Calculate optional field similarities if both items have the field
     if item1.year is not None and item2.year is not None:

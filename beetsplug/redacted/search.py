@@ -512,6 +512,38 @@ class SearchResult:
     artist_name: Optional[str] = None
 
 
+# Placeholders that stand in for "no single artist". Redacted has a literal
+# "Various Artists" artist page, so looking one of these up succeeds and then scores the
+# album against an arbitrary discography -- and, because an artist was found, the
+# free-text search that could actually locate the compilation never runs.
+# The free-text search is only used to find out *which artist* to look at; the real
+# decision is then made against that artist's discography, which still has to clear
+# min_score. So a loose hit is good enough here, and insisting on a full match throws
+# away a usable pointer: a search that returns only "Album Covers" still identifies the
+# artist whose discography holds "Album".
+ARTIST_DISCOVERY_MIN_SCORE = 0.5
+
+
+GENERIC_ARTIST_NAMES = frozenset(
+    {
+        "various artists",
+        "various",
+        "va",
+        "v a",
+        "unknown artist",
+        "unknown",
+        "no artist",
+        "soundtrack",
+        "original soundtrack",
+    }
+)
+
+
+def is_generic_artist(name: str) -> bool:
+    """True if the credit names no particular artist."""
+    return normalize(name) in GENERIC_ARTIST_NAMES
+
+
 def candidate_artist_names(
     album: Album, alt_artists: Optional[list[str]] = None, limit: int = 8
 ) -> list[str]:
@@ -551,7 +583,7 @@ def candidate_artist_names(
     seen: set[str] = set()
     for name in expanded:
         key = normalize(name)
-        if not key or key in seen:
+        if not key or key in seen or key in GENERIC_ARTIST_NAMES:
             continue
         seen.add(key)
         out.append(name)
@@ -707,11 +739,18 @@ def search_album(
         artist_id: Optional[int] = snatched_artist_id
 
         if artist_id is None:
+            # A compilation has no artist to search on, and putting "Various Artists"
+            # into the query only adds noise, so search on the title alone.
+            search_artists = [
+                a
+                for a in (album.albumartist, album.albumartist_credit, album.albumartist_sort)
+                if a and not is_generic_artist(a)
+            ] or [""]
+
             for c_artist, c_album in itertools.product(
-                (album.albumartist, album.albumartist_credit, album.albumartist_sort),
-                (album.album, album.albumdisambig),
+                search_artists, (album.album, album.albumdisambig)
             ):
-                if not c_artist or not c_album:
+                if not c_album:
                     continue
                 try:
                     match_torrent, score = best_match_from_search(
@@ -721,7 +760,11 @@ def search_album(
                     log.debug("Error searching for {0} - {1}: {2}", c_artist, c_album, e)
                     saw_error = True
                     continue
-                if match_torrent and score >= min_score and match_torrent.artist_id:
+                if (
+                    match_torrent
+                    and score >= ARTIST_DISCOVERY_MIN_SCORE
+                    and match_torrent.artist_id
+                ):
                     artist_id = match_torrent.artist_id
                     break
 

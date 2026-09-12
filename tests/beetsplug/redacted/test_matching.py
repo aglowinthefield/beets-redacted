@@ -187,3 +187,70 @@ def test_score_match(
     for field, (min_score, max_score) in expected_scores.items():
         if field != "total" and field in result.field_scores:
             assert min_score <= result.field_scores[field] <= max_score
+
+
+# Title pairs checked by hand against Redacted: the left is the Beets tag, the right the
+# group name. SAME pairs are the same release, DIFFERENT pairs are not. Kept together
+# because the threshold between them is what decides whether an album is reported as an
+# upload candidate, and because character similarity alone does not separate them --
+# "City Life / Proverb" (same) scores 0.67 while "Hide (Amtrac Remix)" (different)
+# scores 0.72.
+SAME_RELEASE = [
+    ("Quiet Forest", "Quiet Forest (クワイエット・フォレスト)"),
+    ("静けさの本", "静けさの本: Static for Piano"),
+    ("MUSIC FOR NINE POST CARDS", "Music for Nine Post Cards (Wave Notation 1)"),
+    ("KOTO VORTEX・I", "Koto Vortex I: Works By Hiroshi Yoshimura"),
+    ("Campo / Outside With You", "Campo"),
+    ("Postman & Magazine", "Postman b/w Magazine"),
+    ("Boo Boo", "Boo Boo (Chopped & Screwed)"),
+    ("Wind in Lonely Fences: 1970–2011", "Wind In Lonely Fences 1970 - 2011"),
+    (
+        "Clapping Music / Music for Pieces of Wood / Sextet",
+        "Sextet - Music for Pieces of Wood - Clapping Music",
+    ),
+    ("City Life / Proverb", "Proverb / Nagoya Marimbas / City Life"),
+    ("Jane 1-11", "Jane 1 - 11"),
+    ("Lyin, Parts 1 - 4 / Would Be", "Lyin (Pt. 1-4) b/w Would Be"),
+    ("Music for 3 Pianos", "Music For Three Pianos"),
+    # A spelling difference in a short title must survive the token gate.
+    ("Colours", "Colors"),
+]
+
+DIFFERENT_RELEASE = [
+    ("Diluvian 无 (Music For Self Extinction)", "Music for Self Esteem"),
+    ("Live / Electric Music", "The Desert Music (Live)"),
+    ("Four Organs / Phase Patterns", "New York Counterpoint / Eight Lines / Four Organs"),
+    ("Eight Lines / City Life", "Sextet / Piano Phase / Eight Lines"),
+    ("Revise", "Everis"),
+    ("Hide (Amtrac Remix)", "UNKLE x Amtrac - Remixes"),
+    ("American Classics: Minimalism", "Minimalism - Winter Landscapes"),
+]
+
+ARTIST_WEIGHTS = {"artist": 0.2, "title": 0.7, "year": 0.1}
+DEFAULT_MIN_SCORE = 0.75
+
+
+@pytest.mark.parametrize("beets_title, red_title", SAME_RELEASE)
+def test_same_release_scores_above_threshold(
+    log: FakeLogger, beets_title: str, red_title: str
+) -> None:
+    result = score_match(
+        Matchable(artist="An Artist", title=beets_title, year=2000),
+        Matchable(artist="An Artist", title=red_title, year=2000),
+        log,
+        ARTIST_WEIGHTS,
+    )
+    assert result.total_score >= DEFAULT_MIN_SCORE
+
+
+@pytest.mark.parametrize("beets_title, red_title", DIFFERENT_RELEASE)
+def test_different_release_scores_below_threshold(
+    log: FakeLogger, beets_title: str, red_title: str
+) -> None:
+    result = score_match(
+        Matchable(artist="An Artist", title=beets_title, year=2000),
+        Matchable(artist="An Artist", title=red_title, year=2000),
+        log,
+        ARTIST_WEIGHTS,
+    )
+    assert result.total_score < DEFAULT_MIN_SCORE
