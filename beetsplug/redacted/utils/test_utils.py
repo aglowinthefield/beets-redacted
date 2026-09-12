@@ -76,7 +76,7 @@ from beets import library  # type: ignore[import-untyped]
 from beets.library import Album  # type: ignore[import-untyped]
 
 from beetsplug.redacted.client import Client
-from beetsplug.redacted.exceptions import RedactedError
+from beetsplug.redacted.exceptions import RedactedAPIFailure, RedactedError
 from beetsplug.redacted.http import HTTPClient
 from beetsplug.redacted.types import (
     RedArtistResponse,
@@ -592,7 +592,9 @@ class FakeClient(Client):
         if artist_name in self.error_artist_name_queries:
             raise RedactedError(f"Error looking up artist {artist_name}")
         if artist_name not in self.artist_name_responses:
-            raise RedactedError(f"No artist found named {artist_name}")
+            # Mirrors the real client: Redacted answers with status "failure", which is
+            # a real "no such artist" rather than a transport error.
+            raise RedactedAPIFailure(f"No artist found named {artist_name}")
         return self.artist_name_responses[artist_name]
 
     def get_artist(self, artist_id: int) -> RedArtistResponse:

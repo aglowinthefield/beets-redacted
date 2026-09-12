@@ -35,7 +35,9 @@ _BRACKET_PAIRS = (
 
 # Strings that separate distinct artists rather than alternate names for one artist.
 _ARTIST_SEPARATORS = re.compile(
-    r"\s*(?:;|,|&|\+|/|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bwith\b|\bvs\.?\b|\band\b|、|，)\s*",
+    # The optional period must sit after the word boundary: "\bfeat\.?\b" would leave
+    # the "." behind, because there is no word boundary between "." and a space.
+    r"\s*(?:;|,|&|\+|/|\bfeat\b\.?|\bft\b\.?|\bfeaturing\b|\bwith\b|\bvs\b\.?|\band\b|、|，)\s*",
     re.IGNORECASE,
 )
 
