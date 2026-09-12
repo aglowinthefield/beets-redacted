@@ -23,6 +23,14 @@ CALLS_PER_PERIOD = 5
 CACHE_DIR = os.path.expanduser("~/.cache/redacted")
 CACHE_EXPIRY = timedelta(days=7)
 
+# (connect, read) seconds. Without this, requests blocks forever: a scan of the whole
+# library hung for six hours on a single connection that stayed ESTABLISHED with an
+# empty receive queue after Redacted stopped responding. A timeout raises
+# requests.exceptions.Timeout, which _get turns into a RedactedError, which the retry
+# decorator then backs off and retries -- so a stalled connection now self-heals
+# instead of stopping the run.
+REQUEST_TIMEOUT = (10, 30)
+
 
 def _is_api_failure_body(response: requests.Response) -> bool:
     """True if the response body is a well-formed Redacted failure payload."""
@@ -79,7 +87,9 @@ class RequestsClient(HTTPClient):
         """
         self.log.debug("Making GET request to {0}: {1}", self.url, params)
         try:
-            response = self.session.get(self.url, params=params, headers=headers)
+            response = self.session.get(
+                self.url, params=params, headers=headers, timeout=REQUEST_TIMEOUT
+            )
 
             # Redacted answers an unknown artist with HTTP 404 and a JSON body of
             # {"status": "failure", "error": "no artist found"}. That is a definitive

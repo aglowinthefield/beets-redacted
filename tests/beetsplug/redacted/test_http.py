@@ -166,3 +166,26 @@ def test_cached_success_response_is_reused(log: FakeLogger):
 
         assert get.call_count == 1
         client.close()
+
+
+def test_get_passes_a_timeout(log: FakeLogger):
+    """Without a timeout requests blocks forever on a stalled connection.
+
+    A whole-library scan hung for six hours on one connection that stayed ESTABLISHED
+    with an empty receive queue after Redacted stopped responding.
+    """
+    client = RequestsClient("https://redacted.sh/ajax.php", log)
+    with patch.object(
+        client.session, "get", return_value=_response(200, b'{"status":"success"}')
+    ) as get:
+        client._get(params={"action": "artist"}, headers={})
+
+    assert get.call_args.kwargs.get("timeout") is not None
+
+
+def test_timeout_becomes_a_retryable_error(log: FakeLogger):
+    """So the retry decorator backs off and the run continues."""
+    client = RequestsClient("https://redacted.sh/ajax.php", log)
+    with patch.object(client.session, "get", side_effect=requests.exceptions.ReadTimeout("slow")):
+        with pytest.raises(RedactedError):
+            client._get(params={"action": "artist"}, headers={})
