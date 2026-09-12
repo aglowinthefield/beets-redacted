@@ -2,6 +2,52 @@
 
 A [Beets](https://beets.io/) plugin for matching albums to torrents on [Redacted](https://redacted.sh).
 
+> **This is a fork** of [judas-red/beets-redacted](https://github.com/judas-red/beets-redacted),
+> which has been unmaintained since May 2025. It is aimed at one job in particular: working
+> out which albums in a library are *not* on Redacted, so they can be uploaded. See
+> [What this fork changes](#what-this-fork-changes).
+
+## What this fork changes
+
+**Cross-script and alternate artist names.** Redacted HTML-escapes every string it
+returns and routinely carries two renderings of one name in a single field --
+`Hiroshi Yoshimura (吉村弘)`, `静けさの本: Static for Piano`,
+`Quiet Forest (クワイエット・フォレスト)`. Upstream compared those raw against Beets
+tags, so anything credited in another script scored near zero. Names are now decoded,
+Unicode-normalized and expanded into variants, and artists are resolved through
+Redacted's own alias system plus MusicBrainz aliases.
+
+Measured on the 15 Hiroshi Yoshimura albums in a real library, against the live API:
+**9 of 15 matched before, 15 of 15 after**, with the group IDs checked by hand against
+the artist's discography. All six that had been missing are genuinely on Redacted --
+i.e. every one was a duplicate upload waiting to happen.
+
+**Knowing *why* nothing matched.** A missing `red_groupid` used to conflate three
+different states: never searched, searched and absent, and lookup failed. Only the
+middle one means "worth uploading". Every album now records what happened:
+
+| `red_status` | meaning |
+| --- | --- |
+| `matched` | found on Redacted |
+| `no_album_match` | the artist is on Redacted, this release is not |
+| `no_artist` | Redacted has no such artist under any name we know |
+| *(unset)* | never looked up, or the lookup failed -- **not** evidence of absence |
+
+Errors deliberately leave the album unstamped, so a network failure is never recorded
+as "not on Redacted". `beet redmissing` lists the candidates.
+
+**Artist-first lookup.** Redacted's `artist` endpoint accepts `artistname` and resolves
+aliases server-side, so the artist is now looked up directly under each name known for
+them instead of being inferred from a free-text search. The old search remains a
+fallback.
+
+**Fixes.** Definitive "no artist found" responses (HTTP 404 with a JSON failure body)
+are no longer retried eight times with exponential backoff, and cached error responses
+are actually reused -- `requests.Response.__bool__` is its `.ok`, so the old truthiness
+check silently refetched every one. Two beets 2.x incompatibilities that had the test
+suite red are fixed. The HTTP cache moved out of `/tmp`, and the API key may come from
+`$RED_API_KEY`.
+
 ## Installation
 
 1. Install the redacted plugin via Pip with `pip install beets-redacted`. If you installed Beets via PipX, then you can use `pipx inject beets beets-redacted`.
@@ -26,6 +72,10 @@ The configuration options are
 - **force** (default: no): When enabled, search for matching torrents even for albums that already have a match in the database.
 - **pretend** (default: no): When enabled, show the changes that would be made to the database, but do not modify the database.
 - **min_score** (experimental, default: 0.75): Minimum match score needed to consider a torrent to be a match to an album. Likely to be changed soon.
+- **aliases** (default: yes): Look up artist aliases on MusicBrainz, via each album's `mb_albumartistid`, so a release credited in one script matches a Redacted artist credited in another. Results are cached on disk for a month. Failures are non-fatal: aliases only ever widen matching.
+- **alias_cache_dir** (default: `~/.cache/redacted/aliases`): Where to keep the alias cache.
+
+The API key may also be supplied in the `RED_API_KEY` environment variable, which takes effect when `api_key` is unset.
 
 For example,
 
@@ -61,13 +111,36 @@ Match torrents for Radiohead albums, and overwrite the existing matches:
 beet redacted -f Radiohead
 ```
 
-List albums that don't have a matching torrent, which may be albums to upload:
+List albums that Redacted was asked about and does not have -- i.e. candidates to upload:
 
 ```shell
-beet ls -a red_torrentid::^$
+beet redmissing
 ```
 
-(note: matching torrents is fuzzy and imperfect and has room for improvement. It's likely that there are torrents for albums without matches. Please do not automatically upload all unmatched albums without review - you are responsible for your own uploads)
+Only the artist, or only the release, is missing:
+
+```shell
+beet redmissing --status no_artist        # Redacted has no such artist
+beet redmissing --status no_album_match   # artist is there, this release is not
+```
+
+Albums that have never been looked up. These are *not* upload candidates; run
+`beet redacted` over them first:
+
+```shell
+beet redmissing --unchecked
+```
+
+Narrow with any Beets query, and choose the output format:
+
+```shell
+beet redmissing -f '$albumartist - $album ($year) $format' format:FLAC
+```
+
+**Matching is fuzzy and imperfect. Review every album before uploading it -- you are
+responsible for your own uploads.** `red_status` records what the tracker answered, not
+a guarantee; a release can be on Redacted under a name neither Beets nor MusicBrainz
+knows. `red_score` records the confidence of whatever match was found.
 
 List albums that are missing tracks (using the `missing` plugin) and have a matching torrent, which may be candidates for snatching to fill gaps in the library:
 
@@ -84,6 +157,7 @@ beet missing -a -c -f '$albumartist - $album: Missing $missing; Red: https://red
 Planned matching improvements:
 
 - ~~Prioritize user's snatches~~
+- ~~Match across scripts and alternate artist names~~
 - If possible, re-use Beets' distance matching algorithm.
 - Add fields other than artist name, album name, and year to the matching process. It should also include the album's media, distributor, multiple artists, remastering, format, encoding, if it's personal freeleech, and if it's bookmarked.
 

@@ -141,7 +141,10 @@ class RedactedCommand(ui.Subcommand):
         self.config = config
         self.log = log
         self.client = client
-        self.aliases = aliases
+        # Not self.aliases: ui.Subcommand.__init__ sets that to the command's alternate
+        # names, which would silently overwrite the provider and leave an empty tuple
+        # here by the time the command runs.
+        self._alias_provider = aliases
 
         default_opts = {
             "min_score": config["min_score"].as_number(),
@@ -192,7 +195,9 @@ class RedactedCommand(ui.Subcommand):
                 assert self.client is not None
 
                 opts = ensure_values(opts, default_opts)
-                return command_func(self, lib, opts, args, self.client, self.log, self.aliases)
+                return command_func(
+                    self, lib, opts, args, self.client, self.log, self._alias_provider
+                )
 
             self.func = func
         else:
@@ -213,6 +218,16 @@ ABSENT_STATUSES = (SearchOutcome.NO_ARTIST.value, SearchOutcome.NO_ALBUM_MATCH.v
 DEFAULT_MISSING_FORMAT = "$albumartist - $album ($year) [$red_status]"
 
 
+def unchecked_query(query: str) -> str:
+    """Beets query for albums whose Redacted status is genuinely unknown.
+
+    An album that already has a red_groupid was matched by an earlier version that
+    did not record red_checked. It is not an unknown and not an upload candidate, so
+    counting it here would badly overstate how much work is left.
+    """
+    return f"{query} red_groupid::^$ red_checked::^$".strip()
+
+
 def missing_command_func(
     lib: Library, opts: Values, args: list[str], log: logging.Logger
 ) -> dict[str, int]:
@@ -224,18 +239,16 @@ def missing_command_func(
     query = " ".join(args) if args else ""
 
     if opts.ensure_value("unchecked", False):
-        statuses = [None]
-        selector = f"{query} red_checked::^$".strip()
-        albums = list(lib.albums(ui.decargs(selector)))
+        albums = list(lib.albums(ui.decargs(unchecked_query(query))))
     else:
         wanted = opts.ensure_value("status", None)
-        statuses = [wanted] if wanted else list(ABSENT_STATUSES)
+        statuses: list[str] = [wanted] if wanted else list(ABSENT_STATUSES)
         albums = []
         seen: set[int] = set()
         for status in statuses:
             selector = f"{query} red_status:{status}".strip()
             for album in lib.albums(ui.decargs(selector)):
-                if album.id not in seen:
+                if album.id is not None and album.id not in seen:
                     seen.add(album.id)
                     albums.append(album)
 
@@ -250,7 +263,7 @@ def missing_command_func(
     # Unchecked albums are the blind spot: they are not evidence of absence, and
     # silently omitting them would overstate how complete the picture is.
     if not opts.ensure_value("unchecked", False):
-        n_unchecked = len(lib.albums(ui.decargs(f"{query} red_checked::^$".strip())))
+        n_unchecked = len(lib.albums(ui.decargs(unchecked_query(query))))
         if n_unchecked:
             ui.print_(
                 f"{n_unchecked} album(s) have never been looked up; "
@@ -288,25 +301,15 @@ class RedactedMissingCommand(ui.Subcommand):
             help="Instead list albums that have never been looked up on Redacted",
         )
         parser.add_option(
-            "-f",
-            "--format",
-            dest="format",
-            default=None,
-            help="Beets format string for each line",
+            "-f", "--format", dest="format", default=None, help="Beets format string for each line"
         )
 
         super().__init__(
-            name="redmissing",
-            parser=parser,
-            help="List library albums that are not on Redacted",
+            name="redmissing", parser=parser, help="List library albums that are not on Redacted"
         )
 
         def func(lib: Library, opts: Values, args: list[str]) -> dict[str, int]:
-            for key, value in {
-                "status": None,
-                "unchecked": False,
-                "format": None,
-            }.items():
+            for key, value in {"status": None, "unchecked": False, "format": None}.items():
                 opts.ensure_value(key, value)
             return missing_command_func(lib, opts, args, self.log)
 

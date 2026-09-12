@@ -5,6 +5,7 @@ import enum
 import functools
 import itertools
 import logging
+import time
 from collections.abc import Generator, Iterable
 from typing import Callable, Optional, Union
 
@@ -12,9 +13,9 @@ from beets.library import Album  # type: ignore[import-untyped]
 from pydantic import ValidationError
 from ratelimit import RateLimitException  # type: ignore[import-untyped]
 
+from beetsplug.redacted.aliases import AliasProvider
 from beetsplug.redacted.client import Client
 from beetsplug.redacted.exceptions import RedactedAPIFailure, RedactedError
-from beetsplug.redacted.aliases import AliasProvider
 from beetsplug.redacted.matching import Matchable, extract_album_fields, score_match
 from beetsplug.redacted.types import (
     BeetsRedFields,
@@ -716,3 +717,47 @@ def search(
     need to tell "not on Redacted" apart from "lookup failed" should use search_album.
     """
     return search_album(album, client, log, min_score, aliases).fields
+
+
+def apply_search_result(album: Album, result: SearchResult) -> bool:
+    """Write a search outcome onto an album. Returns True if metadata changed.
+
+    An ERROR writes nothing at all: the album's status is unknown, and recording it
+    would make a network failure indistinguishable from the tracker not having the
+    release.
+
+    The bookkeeping stamp (red_checked/red_status/red_score) is deliberately excluded
+    from the return value, which reports only whether real Redacted metadata changed.
+    red_checked changes on every run, so folding it in would mark every album modified.
+    """
+    if result.outcome is SearchOutcome.ERROR:
+        return False
+
+    album.red_checked = time.time()
+    album.red_status = result.outcome.value
+    album.red_score = result.score
+
+    # Record which artist was searched even when the release wasn't found, so a
+    # "not on Redacted" verdict can be audited: Redacted resolves its own aliases, and
+    # a name can legitimately resolve to an artist page under a different name.
+    if result.artist_id:
+        album.red_artistid = result.artist_id
+        if result.artist_name:
+            album.red_artist = result.artist_name
+
+    changed = False
+    if result.fields is not None:
+        for key, value in result.fields.__dict__.items():
+            # Skip unset fields. BeetsRedFields leaves anything the API didn't supply
+            # as None, including red_mtime, which it never populates -- copying those
+            # over would wipe good data and make every already-matched album look
+            # modified on every run.
+            if value is None:
+                continue
+            if album.get(key) != value:
+                album[key] = value
+                changed = True
+
+    if changed:
+        album.red_mtime = time.time()
+    return changed

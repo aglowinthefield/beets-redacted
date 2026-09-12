@@ -129,13 +129,12 @@ def test_real_false_negatives_now_match(beets_title: str, red_title: str) -> Non
     assert score == pytest.approx(1.0), f"{beets_title!r} vs {red_title!r} scored {score}"
 
 
-@pytest.mark.parametrize(
-    "beets_artist",
-    ["Hiroshi Yoshimura", "吉村弘"],
-)
+@pytest.mark.parametrize("beets_artist", ["Hiroshi Yoshimura", "吉村弘"])
 def test_artist_matches_redacted_bilingual_name(beets_artist: str) -> None:
     """Redacted names this artist 'Hiroshi Yoshimura (吉村弘)'; either tag should match."""
-    score = best_similarity(name_variants(beets_artist), name_variants("Hiroshi Yoshimura (吉村弘)"))
+    score = best_similarity(
+        name_variants(beets_artist), name_variants("Hiroshi Yoshimura (吉村弘)")
+    )
     assert score == pytest.approx(1.0)
 
 

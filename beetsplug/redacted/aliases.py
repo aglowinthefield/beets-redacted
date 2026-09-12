@@ -41,10 +41,7 @@ class AliasProvider:
     """Looks up alternate names for an artist, with an on-disk cache."""
 
     def __init__(
-        self,
-        log: logging.Logger,
-        cache_dir: Optional[str] = None,
-        enabled: bool = True,
+        self, log: logging.Logger, cache_dir: Optional[str] = None, enabled: bool = True
     ) -> None:
         self.log = log
         self.enabled = enabled and musicbrainzngs is not None

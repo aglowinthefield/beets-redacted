@@ -8,8 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from beetsplug.redacted.command import RedactedCommand
-from beetsplug.redacted.search import SearchOutcome, SearchResult
-from beetsplug.redacted.search import BeetsRedFields
+from beetsplug.redacted.search import BeetsRedFields, SearchOutcome, SearchResult
 from beetsplug.redacted.utils.test_utils import (
     FakeAlbum,
     FakeClient,

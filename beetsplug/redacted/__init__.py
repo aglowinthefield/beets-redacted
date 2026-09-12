@@ -7,17 +7,17 @@ from pkgutil import extend_path
 from typing import Optional
 
 import frozendict
+from beets import ui  # type: ignore[import-untyped]
 from beets.dbcore import types as dbtypes  # type: ignore[import-untyped]
 from beets.importer import ImportTask  # type: ignore[import-untyped]
 from beets.library import Library  # type: ignore[import-untyped]
-from beets import ui  # type: ignore[import-untyped]
 from beets.plugins import BeetsPlugin  # type: ignore[import-untyped]
 
 from beetsplug.redacted.aliases import AliasProvider
 from beetsplug.redacted.client import Client
 from beetsplug.redacted.command import RedactedCommand, RedactedMissingCommand
 from beetsplug.redacted.http import CachedRequestsClient, HTTPClient
-from beetsplug.redacted.search import SearchOutcome, search_album
+from beetsplug.redacted.search import SearchOutcome, apply_search_result, search_album
 
 __path__ = extend_path(__path__, __name__)
 
@@ -146,26 +146,11 @@ class RedactedPlugin(BeetsPlugin):
         # Record that a lookup happened and what it concluded, even when nothing
         # matched, so albums absent from Redacted are distinguishable from unsearched
         # ones without re-querying the API.
-        stamped = False
-        if result.outcome is not SearchOutcome.ERROR:
-            album.red_checked = time.time()
-            album.red_status = result.outcome.value
-            album.red_score = result.score
-            stamped = True
+        fields_changed = apply_search_result(album, result)
 
-        # red_mtime records when the Redacted metadata last changed, so it must not be
-        # bumped by the bookkeeping stamp above, which changes on every single run.
-        fields_changed = False
-        if result.fields:
-            for key, value in result.fields.__dict__.items():
-                if album.get(key) != value:
-                    album[key] = value
-                    fields_changed = True
-
-        if fields_changed:
-            album.red_mtime = time.time()
-
-        return fields_changed or stamped
+        # Returning True for a stamp-only update lets Beets persist the record that
+        # this album was looked up and Redacted did not have it.
+        return fields_changed or result.outcome is not SearchOutcome.ERROR
 
     def commands(self) -> list[ui.Subcommand]:
         """Get the commands provided by this plugin.

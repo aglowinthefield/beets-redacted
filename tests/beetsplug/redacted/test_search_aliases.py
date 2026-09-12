@@ -7,11 +7,14 @@ import pytest
 from beetsplug.redacted.exceptions import RedactedAPIFailure, RedactedError
 from beetsplug.redacted.search import (
     SearchOutcome,
+    SearchResult,
+    apply_search_result,
     candidate_artist_names,
     resolve_artist_by_name,
     search_album,
 )
 from beetsplug.redacted.types import (
+    BeetsRedFields,
     RedArtistResponse,
     RedArtistResponseResults,
     RedArtistTorrent,
@@ -112,9 +115,7 @@ def test_resolve_artist_tries_names_until_one_resolves(log: FakeLogger) -> None:
     client = FakeClient()
     client.artist_name_responses["吉村弘"] = make_artist_response()
 
-    response, name, saw_error = resolve_artist_by_name(
-        client, ["Hiroshi Yoshimura", "吉村弘"], log
-    )
+    response, name, saw_error = resolve_artist_by_name(client, ["Hiroshi Yoshimura", "吉村弘"], log)
 
     assert response is not None
     assert response.response.id == ARTIST_ID
@@ -221,3 +222,73 @@ def test_search_uses_aliases_to_find_artist(log: FakeLogger) -> None:
     assert result.outcome is SearchOutcome.MATCHED
     assert result.fields is not None
     assert result.fields.red_groupid == 254496
+
+
+# --- apply_search_result ----------------------------------------------------------
+
+
+def test_apply_result_stamps_absence() -> None:
+    """A 'not on Redacted' verdict must be recorded, and record which artist we checked."""
+    album = make_album()
+    result = SearchResult(
+        outcome=SearchOutcome.NO_ALBUM_MATCH,
+        score=0.4,
+        artist_id=ARTIST_ID,
+        artist_name=RED_ARTIST_NAME,
+    )
+
+    changed = apply_search_result(album, result)
+
+    assert changed is False  # no Redacted metadata changed
+    assert album.red_status == "no_album_match"
+    assert album.red_checked
+    assert album.red_score == pytest.approx(0.4)
+    # The artist that was searched, so the verdict can be audited.
+    assert album.red_artistid == ARTIST_ID
+    assert album.red_artist == RED_ARTIST_NAME
+    assert not album.get("red_groupid")
+
+
+def test_apply_result_writes_nothing_on_error() -> None:
+    """A failed lookup must never be recorded as absence."""
+    album = make_album()
+    changed = apply_search_result(album, SearchResult(outcome=SearchOutcome.ERROR))
+
+    assert changed is False
+    assert not album.get("red_status")
+    assert not album.get("red_checked")
+
+
+def test_apply_result_sets_mtime_only_when_metadata_changes() -> None:
+    album = make_album()
+    fields = BeetsRedFields(red_groupid=254496, red_torrentid=999)
+    result = SearchResult(outcome=SearchOutcome.MATCHED, fields=fields, score=1.0)
+
+    assert apply_search_result(album, result) is True
+    first_mtime = album.red_mtime
+    assert first_mtime
+
+    # Re-applying identical fields is not a metadata change, so red_mtime holds.
+    assert apply_search_result(album, result) is False
+    assert album.red_mtime == first_mtime
+
+
+def test_command_keeps_its_alias_provider() -> None:
+    """ui.Subcommand.__init__ assigns self.aliases (the command's alternate names).
+
+    Storing the alias provider there gets it silently overwritten with an empty tuple,
+    and the command then crashes calling .aliases_for_album() on a tuple.
+    """
+    from beetsplug.redacted.command import RedactedCommand
+    from beetsplug.redacted.utils.test_utils import FakeConfig
+
+    class Provider:
+        def aliases_for_album(self, album: object) -> list[str]:
+            return ["吉村弘"]
+
+    provider = Provider()
+    command = RedactedCommand(FakeConfig(), FakeLogger(), FakeClient(), provider)
+
+    assert command._alias_provider is provider
+    # The base class's own attribute must be left alone.
+    assert command.aliases == ()
