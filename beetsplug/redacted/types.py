@@ -177,10 +177,32 @@ Response format:
 # ruff: noqa: N815
 
 import dataclasses
+import html
 from enum import Enum
-from typing import Generic, Literal, Optional, TypeVar, Union
+from typing import Annotated, Generic, Literal, Optional, TypeVar, Union
 
+from pydantic import BeforeValidator
 from pydantic.dataclasses import dataclass
+
+
+def _unescape(value: object) -> object:
+    """Fully decode HTML entities on a string, leaving anything else alone."""
+    if not isinstance(value, str) or not value:
+        return value
+    # Some fields come back double-encoded ('&amp;amp;'), so iterate until stable.
+    for _ in range(3):
+        decoded = html.unescape(value)
+        if decoded == value:
+            break
+        value = decoded
+    return value
+
+
+# Redacted HTML-escapes every human-readable string it returns, so a group comes
+# back as "Pier &amp; Loft" or "&#21513;&#26449;&#24344;" and compares as garbage
+# against Beets tags. Decode at parse time, so both matching and any value stored
+# into the Beets database are the real text.
+RedStr = Annotated[str, BeforeValidator(_unescape)]
 
 
 class Action(Enum):
@@ -224,18 +246,18 @@ class RedSearchTorrent:
     artists: Optional[list[RedArtist]] = None
     remastered: Optional[bool] = None
     remasterYear: Optional[int] = None
-    remasterCatalogueNumber: Optional[str] = None
-    remasterTitle: Optional[str] = None
-    media: Optional[str] = None
-    encoding: Optional[str] = None
-    format: Optional[str] = None
+    remasterCatalogueNumber: Optional[RedStr] = None
+    remasterTitle: Optional[RedStr] = None
+    media: Optional[RedStr] = None
+    encoding: Optional[RedStr] = None
+    format: Optional[RedStr] = None
     hasLog: Optional[bool] = None
     logScore: Optional[int] = None
     hasCue: Optional[bool] = None
     scene: Optional[bool] = None
     vanityHouse: Optional[bool] = None
     fileCount: Optional[int] = None
-    time: Optional[str] = None
+    time: Optional[RedStr] = None
     size: Optional[int] = None
     snatches: Optional[int] = None
     seeders: Optional[int] = None
@@ -259,13 +281,13 @@ class RedSearchResult:
 
     groupId: Optional[int] = None
     torrents: Optional[list[RedSearchTorrent]] = None
-    groupName: Optional[str] = None
-    artist: Optional[str] = None
-    tags: Optional[list[str]] = None
+    groupName: Optional[RedStr] = None
+    artist: Optional[RedStr] = None
+    tags: Optional[list[RedStr]] = None
     bookmarked: Optional[bool] = None
     vanityHouse: Optional[bool] = None
     groupYear: Optional[int] = None
-    releaseType: Optional[str] = None
+    releaseType: Optional[RedStr] = None
     groupTime: Optional[int] = None
     maxSize: Optional[int] = None
     totalSnatched: Optional[int] = None
@@ -285,7 +307,7 @@ class RedFailureResponse:
     """Base type for failed API responses."""
 
     status: Literal["failure"]
-    error: Optional[str] = None
+    error: Optional[RedStr] = None
 
 
 @dataclass
@@ -335,13 +357,13 @@ class RedArtistTorrent:
 
     id: Optional[int] = None
     groupId: Optional[int] = None
-    media: Optional[str] = None  # Media, e.g. "Vinyl", "CD", "Web"
-    format: Optional[str] = None  # Format, e.g. "FLAC", "MP3"
-    encoding: Optional[str] = None  # Encoding, e.g. "24bit Lossless", "VBR", "CBR"
+    media: Optional[RedStr] = None  # Media, e.g. "Vinyl", "CD", "Web"
+    format: Optional[RedStr] = None  # Format, e.g. "FLAC", "MP3"
+    encoding: Optional[RedStr] = None  # Encoding, e.g. "24bit Lossless", "VBR", "CBR"
     remasterYear: Optional[int] = None  # Remaster year. 0 indicates no remaster or no value.
     remastered: Optional[bool] = None
-    remasterTitle: Optional[str] = None
-    remasterRecordLabel: Optional[str] = None
+    remasterTitle: Optional[RedStr] = None
+    remasterRecordLabel: Optional[RedStr] = None
     scene: Optional[bool] = None
     hasLog: Optional[bool] = None
     hasCue: Optional[bool] = None
@@ -354,7 +376,7 @@ class RedArtistTorrent:
     leechers: Optional[int] = None
     seeders: Optional[int] = None
     snatched: Optional[int] = None
-    time: Optional[str] = None  # Time string, e.g. "2009-06-06 19:04:22"
+    time: Optional[RedStr] = None  # Time string, e.g. "2009-06-06 19:04:22"
     hasFile: Optional[int] = None  # Unclear what this is.
 
 
@@ -372,11 +394,11 @@ class RedArtistTorrentGroup:
     """
 
     groupId: Optional[int] = None
-    groupName: Optional[str] = None
+    groupName: Optional[RedStr] = None
     groupYear: Optional[int] = None
-    groupRecordLabel: Optional[str] = None
-    groupCatalogueNumber: Optional[str] = None
-    tags: Optional[list[str]] = None
+    groupRecordLabel: Optional[RedStr] = None
+    groupCatalogueNumber: Optional[RedStr] = None
+    tags: Optional[list[RedStr]] = None
     releaseType: Optional[int] = None
     groupVanityHouse: Optional[bool] = None
     hasBookmarked: Optional[bool] = None
@@ -389,9 +411,9 @@ class RedArtistRequest:
 
     requestId: Optional[int] = None
     categoryId: Optional[int] = None
-    title: Optional[str] = None
+    title: Optional[RedStr] = None
     year: Optional[int] = None
-    timeAdded: Optional[str] = None
+    timeAdded: Optional[RedStr] = None
     votes: Optional[int] = None
     bounty: Optional[int] = None
 
@@ -401,11 +423,11 @@ class RedArtistResponseResults:
     """Type for the artist response data."""
 
     id: Optional[int] = None
-    name: Optional[str] = None
+    name: Optional[RedStr] = None
     notificationsEnabled: Optional[bool] = None
     hasBookmarked: Optional[bool] = None
-    image: Optional[str] = None
-    body: Optional[str] = None
+    image: Optional[RedStr] = None
+    body: Optional[RedStr] = None
     vanityHouse: Optional[bool] = None
     tags: Optional[list[RedArtistTag]] = None
     similarArtists: Optional[list[dict]] = None
@@ -426,9 +448,9 @@ class RedUserTorrent:
     """Type for a user torrent."""
 
     groupId: Optional[int] = None
-    name: Optional[str] = None
+    name: Optional[RedStr] = None
     torrentId: Optional[int] = None
-    artistName: Optional[str] = None
+    artistName: Optional[RedStr] = None
     artistId: Optional[int] = None
 
 
