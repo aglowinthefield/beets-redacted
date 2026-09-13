@@ -322,11 +322,24 @@ class FakeAlbum(Album):
         return new_album
 
     def _template_funcs(self) -> dict[str, Any]:
-        """Return an empty dictionary of template functions.
+        """Return the default template functions.
 
         This overrides the parent class method to avoid accessing _db.
+
+        Beets 2.x moved DefaultTemplateFunctions out of beets.library and into
+        beets.library.models, and changed its signature from (item) to (item, lib), so
+        resolve both rather than pinning either.
         """
-        funcs: dict[str, Any] = library.DefaultTemplateFunctions(self).functions()
+        default_funcs = getattr(library, "DefaultTemplateFunctions", None)
+        if default_funcs is None:
+            from beets.library import models as _models
+
+            default_funcs = _models.DefaultTemplateFunctions
+
+        try:
+            funcs: dict[str, Any] = default_funcs(self, self._library).functions()
+        except TypeError:
+            funcs = default_funcs(self).functions()
         return funcs
 
     # Override these methods to throw errors for operations we don't support
