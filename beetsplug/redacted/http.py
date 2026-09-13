@@ -21,6 +21,19 @@ CALLS_PER_PERIOD = 5
 CACHE_DIR = "/tmp/redacted"
 CACHE_EXPIRY = timedelta(days=7)
 
+# (connect, read) seconds. Without a timeout, requests blocks forever on a stalled
+# connection: a library-wide scan stopped after ~2,900 albums and sat for six hours,
+# process alive, one socket ESTABLISHED with an empty receive queue.
+REQUEST_TIMEOUT = (10, 30)
+
+
+def _is_api_failure_body(response: requests.Response) -> bool:
+    """True if the body is a well-formed Redacted failure payload."""
+    try:
+        return bool(response.json().get("status") == "failure")
+    except ValueError:
+        return False
+
 
 class HTTPClient(ABC):
     """Abstract base class for HTTP clients."""
@@ -69,7 +82,20 @@ class RequestsClient(HTTPClient):
         """
         self.log.debug("Making GET request to {0}: {1}", self.url, params)
         try:
-            response = self.session.get(self.url, params=params, headers=headers)
+            response = self.session.get(
+                self.url, params=params, headers=headers, timeout=REQUEST_TIMEOUT
+            )
+
+            # Redacted answers an unknown artist with HTTP 404 and a body of
+            # {"status": "failure", "error": "no artist found"}. That is a definitive
+            # answer, not a transport fault. Raising sends it through the retry
+            # decorator below, costing eight requests and an exponential backoff for
+            # every miss, and the response is never cached. Return it instead and let
+            # _make_api_request turn the payload into a RedactedError.
+            if response.status_code in (400, 404) and _is_api_failure_body(response):
+                self.log.debug("Redacted API failure response: {0}", response.text)
+                return response
+
             response.raise_for_status()
             return response
         except requests.exceptions.HTTPError as e:
@@ -190,9 +216,14 @@ class CachedRequestsClient(RequestsClient):
             RedactedRateLimitError: If rate limited by the Redacted API.
             RateLimitException: If rate limited by the ratelimit library.
         """
-        # Check cache first
+        # Check cache first.
+        #
+        # This must be an explicit None check. requests.Response.__bool__ is its .ok,
+        # so a truthiness test silently discards every cached non-2xx response and
+        # refetches it -- which matters now that a 404 "no artist found" is a cached,
+        # definitive answer rather than an error.
         cached_response = self._get_cached_response(params, headers)
-        if cached_response:
+        if cached_response is not None:
             return cached_response
 
         # If not in cache, make the request
