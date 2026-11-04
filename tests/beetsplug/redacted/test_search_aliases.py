@@ -385,10 +385,10 @@ def test_search_matches_exact_title_under_an_artist_alias(log: FakeLogger) -> No
     """B'eirth resolves to the page "In Gowan Ring"; the page name must not count against it."""
     client = FakeClient()
     client.user_response = empty_user_response()
-    client.artist_name_responses["Hiroshi Yoshimura"] = make_artist_response(
-        [make_group("Quiet Forest", 1990)]  # exact title, years disagree
-    )
-    album = make_album(albumartist="Hiroshi Yoshimura", year=2017)
+    response = make_artist_response([make_group("Quiet Forest", 1990)])  # years disagree
+    response.response.name = "In Gowan Ring"
+    client.artist_name_responses["B'eirth"] = response
+    album = make_album(albumartist="B'eirth", albumartist_sort="B'eirth", year=2017)
 
     result = search_album(album, client, log, min_score=0.75)
 
