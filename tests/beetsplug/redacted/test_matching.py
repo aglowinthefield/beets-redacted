@@ -254,3 +254,22 @@ def test_different_release_scores_below_threshold(
         ARTIST_WEIGHTS,
     )
     assert result.total_score < DEFAULT_MIN_SCORE
+
+
+@pytest.mark.parametrize(
+    "a, b, expected",
+    [
+        ("For Keeps + Singles", "For Keeps", True),
+        ("The Tired Sounds of Stars of the Lid", "The Tired Sounds Of", True),
+        ("Album Name (Deluxe Edition)", "Album Name", True),
+        ("Greatest Hits", "Greatest Hits Vol. 2", False),
+        ("Greatest Hits", "Greatest Hits 2", False),
+        ("Love", "Love Story", False),  # single-word prefix is too weak
+        ("Revise", "Everis", False),
+        ("Album One", "Album One", False),
+    ],
+)
+def test_title_contains(a, b, expected):
+    from beetsplug.redacted.matching import title_contains
+
+    assert title_contains(a, b) is expected

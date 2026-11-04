@@ -258,7 +258,9 @@ def match_artist_album_scored(
     log: logging.Logger,
     min_score: float,
     alt_artists: Optional[list[str]] = None,
-) -> tuple[Union[RedArtistTorrentGroup, None], Union[RedArtistTorrent, None], float]:
+) -> tuple[
+    Union[RedArtistTorrentGroup, None], Union[RedArtistTorrent, None], float, Optional[str]
+]:
     """Match an album against an artist's torrent groups, returning the match score.
 
     Args:
@@ -270,8 +272,9 @@ def match_artist_album_scored(
         alt_artists: Additional names for the album's artist, e.g. MusicBrainz aliases
 
     Returns:
-        Tuple of (matching group, matching torrent, score). The group and torrent are
-        None when nothing scored above min_score.
+        Tuple of (matching group, matching torrent, score, closest group name). The group
+        and torrent are None when nothing scored above min_score; the name is the best
+        scoring group either way, so a near-miss can be reviewed by hand.
     """
     album_fields = extract_album_fields(album, alt_artists=alt_artists)
 
@@ -280,7 +283,7 @@ def match_artist_album_scored(
 
     if not torrent_groups:
         log.debug("Artist {:s} has no torrent groups", artist_data.name)
-        return None, None, 0.0
+        return None, None, 0.0, None
 
     # Find the best match among all artist's torrent groups
     best_group: Union[RedArtistTorrentGroup, None] = None
@@ -303,7 +306,7 @@ def match_artist_album_scored(
         # If this group has the preferred torrent ID, use it as the best match
         preferred_torrent = next((t for t in group.torrent if t.id in pt_ids), None)
         if preferred_torrent:
-            return group, preferred_torrent, 1.0
+            return group, preferred_torrent, 1.0, group.groupName
 
         group_fields = artist_torrent_group_matchable(group, artist_data.name)
         if not group_fields:
@@ -338,7 +341,7 @@ def match_artist_album_scored(
             artist_data.id,
             artist_data.name,
         )
-        return None, None, best_match_score
+        return None, None, best_match_score, None
 
     if best_match_score < min_score:
         log.debug(
@@ -349,7 +352,7 @@ def match_artist_album_scored(
             best_match_score,
             min_score,
         )
-        return None, None, best_match_score
+        return None, None, best_match_score, best_group.groupName
 
     log.debug(
         "Best match for {0} from artist's groups: {1} (score: {2:.2f})",
@@ -358,7 +361,7 @@ def match_artist_album_scored(
         best_match_score,
     )
 
-    return best_group, best_torrent, best_match_score
+    return best_group, best_torrent, best_match_score, best_group.groupName
 
 
 def match_artist_album(
@@ -373,7 +376,7 @@ def match_artist_album(
 
     Thin wrapper over match_artist_album_scored that drops the score.
     """
-    group, torrent, _ = match_artist_album_scored(
+    group, torrent, _, _ = match_artist_album_scored(
         album, artist_response, preferred_torrents, log, min_score, alt_artists
     )
     return group, torrent
@@ -511,6 +514,8 @@ class SearchResult:
     score: float = 0.0
     artist_id: Optional[int] = None
     artist_name: Optional[str] = None
+    # Name of the closest Redacted group when nothing matched, for manual review.
+    closest: Optional[str] = None
 
 
 # Placeholders that stand in for "no single artist". Redacted has a literal
@@ -802,10 +807,10 @@ def search_album(
             outcome=SearchOutcome.ERROR if saw_error else SearchOutcome.NO_ALBUM_MATCH, score=score
         )
 
-    def try_artist(artist_response: RedArtistResponse) -> tuple[Optional[SearchResult], float]:
-        """Match within one artist's discography. Returns (match, best score seen)."""
+    def try_artist(artist_response: RedArtistResponse) -> tuple[Optional[SearchResult], float, Optional[str]]:
+        """Match within one artist's discography. Returns (match, best score, closest group)."""
         artist_data = artist_response.response
-        group, torrent, score = match_artist_album_scored(
+        group, torrent, score, closest = match_artist_album_scored(
             album, artist_response, preferred_torrents, log, min_score, alt_artists
         )
         if group and torrent:
@@ -820,14 +825,16 @@ def search_album(
                         artist_name=artist_data.name,
                     ),
                     score,
+                    closest,
                 )
             log.debug(
                 "Could not build Beets fields for {0}, treating as no match", album.get("album")
             )
-        return None, score
+        return None, score, closest
 
     # Best near-miss across every artist tried, for reporting when nothing matches.
     best_score = 0.0
+    best_closest: Optional[str] = None
     best_artist: Optional[RedArtistResponseResults] = None
     found_any_artist = False
 
@@ -840,11 +847,12 @@ def search_album(
             break
 
         found_any_artist = True
-        match, score = try_artist(artist_response)
+        match, score, closest = try_artist(artist_response)
         if match is not None:
             return match
         if best_artist is None or score > best_score:
             best_score = score
+            best_closest = closest
             best_artist = artist_response.response
 
     # Fallback: free-text search, used only to discover an artist id we haven't tried.
@@ -897,7 +905,7 @@ def search_album(
             log.debug("Error looking up artist {0}: {1}", artist_id, e)
             return SearchResult(outcome=SearchOutcome.ERROR)
 
-        match, best_score = try_artist(artist_response)
+        match, best_score, best_closest = try_artist(artist_response)
         if match is not None:
             return match
         best_artist = artist_response.response
@@ -911,6 +919,7 @@ def search_album(
     return SearchResult(
         outcome=SearchOutcome.ERROR if saw_error else SearchOutcome.NO_ALBUM_MATCH,
         score=best_score,
+        closest=best_closest,
         artist_id=best_artist.id if best_artist else None,
         artist_name=best_artist.name if best_artist else None,
     )
@@ -948,6 +957,8 @@ def apply_search_result(album: Album, result: SearchResult) -> bool:
     album.red_checked = time.time()
     album.red_status = result.outcome.value
     album.red_score = result.score
+    if result.closest:
+        album.red_closest = result.closest
 
     # Record which artist was searched even when the release wasn't found, so a
     # "not on Redacted" verdict can be audited: Redacted resolves its own aliases, and

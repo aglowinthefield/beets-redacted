@@ -235,10 +235,12 @@ def test_apply_result_stamps_absence() -> None:
         score=0.4,
         artist_id=ARTIST_ID,
         artist_name=RED_ARTIST_NAME,
+        closest="Nearly That",
     )
 
     changed = apply_search_result(album, result)
 
+    assert album.red_closest == "Nearly That"
     assert changed is False  # no Redacted metadata changed
     assert album.red_status == "no_album_match"
     assert album.red_checked

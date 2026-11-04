@@ -38,6 +38,7 @@ class RedactedPlugin(BeetsPlugin):
             "red_checked": dbtypes.FLOAT,
             "red_status": dbtypes.STRING,
             "red_score": dbtypes.FLOAT,
+            "red_closest": dbtypes.STRING,
             "red_torrentid": dbtypes.INTEGER,
             "red_remastered": dbtypes.BOOLEAN,
             "red_remasteryear": dbtypes.INTEGER,

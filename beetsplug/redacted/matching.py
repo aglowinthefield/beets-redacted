@@ -135,6 +135,30 @@ MIN_WORDS_FOR_TOKEN_GATE = 3
 MIN_SHORT_TITLE_SIMILARITY = 0.85
 
 
+# Words that make an extended title a different release rather than a longer name for
+# the same one: "Greatest Hits" is not "Greatest Hits Vol. 2".
+_SEQUEL_WORDS = frozenset({"vol", "volume", "part", "pt", "ii", "iii", "iv", "v", "vi"})
+MIN_WORDS_FOR_CONTAINMENT = 2
+CONTAINMENT_TITLE_SCORE = 0.9
+
+
+def title_contains(a: str, b: str) -> bool:
+    """True when one title is the other plus a trailing tag, e.g. "+ Singles".
+
+    The shorter title must be a whole-word prefix of the longer one, at least
+    MIN_WORDS_FOR_CONTAINMENT words long, and the extra words must not look like a
+    sequel number.
+    """
+    words_a, words_b = normalize(a).split(), normalize(b).split()
+    short, long_ = sorted((words_a, words_b), key=len)
+    if len(short) < MIN_WORDS_FOR_CONTAINMENT or len(short) == len(long_):
+        return False
+    if long_[: len(short)] != short:
+        return False
+    extra = long_[len(short) :]
+    return not any(w in _SEQUEL_WORDS or w.isdigit() for w in extra)
+
+
 def token_overlap(a: str, b: str) -> float:
     """Proportion of words two names share, over the words they use between them."""
     words_a, words_b = set(normalize(a).split()), set(normalize(b).split())
@@ -258,6 +282,11 @@ def score_match(
                 scores["title"] = min(scores["title"], shared_words)
         elif scores["title"] < MIN_SHORT_TITLE_SIMILARITY:
             scores["title"] *= 0.5
+
+    # A title that is another with a tag appended ("For Keeps" / "For Keeps + Singles",
+    # "Album" / "Album (Deluxe)") is the same release; character similarity undersells it.
+    if scores["title"] < CONTAINMENT_TITLE_SCORE and title_contains(item1.title, item2.title):
+        scores["title"] = CONTAINMENT_TITLE_SCORE
 
     # Calculate optional field similarities if both items have the field
     if item1.year is not None and item2.year is not None:
