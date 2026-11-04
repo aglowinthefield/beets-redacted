@@ -379,3 +379,17 @@ def test_candidate_names_still_dedupe_nfkc_equivalents() -> None:
     """Halfwidth and fullwidth middle dots are the same string to the server."""
     album = make_album(albumartist="A･I･R", albumartist_sort="A・I・R")
     assert len(candidate_artist_names(album)) == 1
+
+
+def test_search_matches_exact_title_under_an_artist_alias(log: FakeLogger) -> None:
+    """B'eirth resolves to the page "In Gowan Ring"; the page name must not count against it."""
+    client = FakeClient()
+    client.user_response = empty_user_response()
+    client.artist_name_responses["Hiroshi Yoshimura"] = make_artist_response(
+        [make_group("Quiet Forest", 1990)]  # exact title, years disagree
+    )
+    album = make_album(albumartist="Hiroshi Yoshimura", year=2017)
+
+    result = search_album(album, client, log, min_score=0.75)
+
+    assert result.outcome is SearchOutcome.MATCHED

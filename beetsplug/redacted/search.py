@@ -258,6 +258,7 @@ def match_artist_album_scored(
     log: logging.Logger,
     min_score: float,
     alt_artists: Optional[list[str]] = None,
+    artist_resolved_by_name: bool = False,
 ) -> tuple[
     Union[RedArtistTorrentGroup, None], Union[RedArtistTorrent, None], float, Optional[str]
 ]:
@@ -270,6 +271,9 @@ def match_artist_album_scored(
         log: Logger instance for logging messages
         min_score: Minimum similarity score to consider a match (0-1)
         alt_artists: Additional names for the album's artist, e.g. MusicBrainz aliases
+        artist_resolved_by_name: Redacted resolved this artist page from the album's own
+            artist name, so the page's display name is not evidence against the match.
+            Needed when the name is an alias: B'eirth resolves to "In Gowan Ring".
 
     Returns:
         Tuple of (matching group, matching torrent, score, closest group name). The group
@@ -314,6 +318,13 @@ def match_artist_album_scored(
                 "Could not extract matching fields from artist group {0}, skipping", group.groupName
             )
             continue
+        if artist_resolved_by_name:
+            group_fields = Matchable(
+                artist=group_fields.artist,
+                title=group_fields.title,
+                year=group_fields.year,
+                alt_artists=[album_fields.artist, *album_fields.alt_artists],
+            )
 
         # Score match considering that we know we're matching against the correct artist
         match_result = score_match(album_fields, group_fields, log, weights)
@@ -807,11 +818,13 @@ def search_album(
             outcome=SearchOutcome.ERROR if saw_error else SearchOutcome.NO_ALBUM_MATCH, score=score
         )
 
-    def try_artist(artist_response: RedArtistResponse) -> tuple[Optional[SearchResult], float, Optional[str]]:
+    def try_artist(
+        artist_response: RedArtistResponse, by_name: bool = False
+    ) -> tuple[Optional[SearchResult], float, Optional[str]]:
         """Match within one artist's discography. Returns (match, best score, closest group)."""
         artist_data = artist_response.response
         group, torrent, score, closest = match_artist_album_scored(
-            album, artist_response, preferred_torrents, log, min_score, alt_artists
+            album, artist_response, preferred_torrents, log, min_score, alt_artists, by_name
         )
         if group and torrent:
             fields = beets_fields_from_artist_torrent_groups(artist_data, group, torrent, log)
@@ -847,7 +860,7 @@ def search_album(
             break
 
         found_any_artist = True
-        match, score, closest = try_artist(artist_response)
+        match, score, closest = try_artist(artist_response, by_name=True)
         if match is not None:
             return match
         if best_artist is None or score > best_score:
