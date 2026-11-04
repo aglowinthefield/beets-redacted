@@ -81,6 +81,8 @@ def command_func(
                     album.red_checked = time.time()
                     album.red_status = result.outcome.value
                     album.red_score = result.score
+                    if result.closest:
+                        album.red_closest = result.closest
 
                     # Only real Redacted metadata counts as a modification. The stamp
                     # above changes on every run, so folding it in would report every
